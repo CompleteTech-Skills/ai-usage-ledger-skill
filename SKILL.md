@@ -6,7 +6,7 @@ version: 1.6.0
 metadata:
   openclaw:
     skillKey: ai-usage-ledger
-    homepage: https://github.com/CompleteTech-LLC/ai-usage-ledger-skill
+    homepage: https://github.com/CompleteTech-Skills/ai-usage-ledger-skill
     requires:
       bins:
         - python3

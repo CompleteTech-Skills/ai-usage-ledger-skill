@@ -29,7 +29,7 @@ The ledger is the evidence member of the CompleteTech LLC skill family. It suppl
 | Version | `1.6.0` |
 | Core runtime | `python3`; Python standard library |
 | Optional document libraries | See [requirements.txt](requirements.txt) for PDF, DOCX and preview dependencies |
-| Repository | `CompleteTech-LLC/ai-usage-ledger-skill` |
+| Repository | `CompleteTech-Skills/ai-usage-ledger-skill` |
 | Package contract | [skill-package.json](skill-package.json), schema 1 |
 
 The full GitHub checkout contains the logo and previews. A text-only registry bundle can omit binary assets; the new package validator targets the full checkout. This change does not publish a registry release.

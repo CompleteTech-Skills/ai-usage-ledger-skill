@@ -95,7 +95,7 @@ requires its maintainers' permission; until that change is accepted, apply the
 included patch to the exact pinned revision:
 
 ```bash
-git clone https://github.com/CompleteTech-LLC/ai-usage-ledger-skill.git ledger
+git clone https://github.com/CompleteTech-Skills/ai-usage-ledger-skill.git ledger
 git clone https://github.com/muse-mesh/mu.git mu
 git -C mu checkout -b usage-ledger e537b757c112557f5256b3397523a6772d768697
 git -C mu apply --check ../ledger/integrations/muse-mesh/mu.patch.txt

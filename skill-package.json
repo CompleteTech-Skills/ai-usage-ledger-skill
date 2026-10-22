@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "family": "completetech-skills",
-  "repository": "CompleteTech-LLC/ai-usage-ledger-skill",
+  "repository": "CompleteTech-Skills/ai-usage-ledger-skill",
   "skill_name": "ai-usage-ledger",
   "kind": "usage-ledger",
   "entrypoints": ["scripts/ledger.py", "scripts/run_pipeline.py", "scripts/render_ledger_doc.py"],

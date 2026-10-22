@@ -14,8 +14,8 @@ Part of the CompleteTech LLC agentic services skill library. Where the `agentic-
 
 - Skill key: `ai-usage-ledger`
 - Version-ready metadata: `1.5.12`
-- Homepage: https://github.com/CompleteTech-LLC/ai-usage-ledger-skill
-- README: https://github.com/CompleteTech-LLC/ai-usage-ledger-skill#readme
+- Homepage: https://github.com/CompleteTech-Skills/ai-usage-ledger-skill
+- README: https://github.com/CompleteTech-Skills/ai-usage-ledger-skill#readme
 - Runtime binaries: `python3`
 - Python packages: none at runtime (standard library); `pyyaml==6.0.3` and `ruff==0.14.0` for the quality validator; optional `reportlab==4.5.1` and `python-docx==1.2.0` for PDF / DOCX documents (optional PNG preview: `pypdfium2==5.8.0`, `pillow==12.2.0`)
 - Intended registry/discovery tags: `latest`, `complete-tech`, `codex-skill`, `claude-code`, `codex`, `token-usage`, `cost-analysis`, `observability`, `ledger`, `dashboard`, `pdf`, `anonymization`
