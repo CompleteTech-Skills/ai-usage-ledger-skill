@@ -38,7 +38,7 @@ index 0000000..f3b390a
 +cost tracker remains unchanged and is not treated as a reported charge.
 +
 +The companion implementation and complete operator guide are in
-+`CompleteTech-LLC/ai-usage-ledger-skill`, `references/muse-mesh.md`. Its Python
++`CompleteTech-Skills/ai-usage-ledger-skill`, `references/muse-mesh.md`. Its Python
 +standard-library MCP server uses Muse's existing `mcpServers` configuration;
 +there is no additional Muse plugin framework or model provider dependency.
 +
