@@ -132,7 +132,7 @@ class Anonymizer:
         if e.get("tool") == "goose" and isinstance(e.get("goose"), dict):
             e["goose"] = self._goose_evidence(e["goose"])
         e["cwd"] = self.cwd(e.get("cwd"))
-        for k in ("src", "project", "text", "id", "ingested_at"):
+        for k in ("src", "project", "text", "id", "ingested_at", "ledger_identity"):
             e.pop(k, None)
         if e.get("account"):
             e["account"] = self.account(e["account"])

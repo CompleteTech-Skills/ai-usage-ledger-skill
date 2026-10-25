@@ -134,7 +134,7 @@ def run():
     print("per-root inventory counts (files, bytes, errors):", "OK" if per_root else "MISSING", [(r["tool"], r.get("files")) for r in inv["roots"]])
     ok = ok and per_root
     evidence = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", HERE,
-                               "-p", "test_parser_evidence.py", "-v"])
+                               "-p", "test_*evidence.py", "-v"])
     ok = ok and evidence.returncode == 0
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     return 0 if ok else 1

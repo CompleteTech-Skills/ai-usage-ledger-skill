@@ -14,6 +14,8 @@ assert SPEC and SPEC.loader
 compiler = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(compiler)
 
+import ledger_store  # noqa: E402 -- compiler makes its sibling modules importable
+
 
 class ParserEvidenceTests(unittest.TestCase):
     def setUp(self):
@@ -105,6 +107,38 @@ class ParserEvidenceTests(unittest.TestCase):
                 self.assertEqual([row["cost_usd"] for row in events], [0, 0.125, None, None, None])
                 self.assertEqual([row["total"] for row in events], [12] * 5)
                 self.assertEqual(stats.events, 5)
+
+    def test_falsy_malformed_costs_remain_unknown_and_ingestible(self):
+        for tool in ("openclaw", "pi"):
+            with self.subTest(tool=tool):
+                rows = []
+                costs = (0, 0.0, -0.0, False, "", {}, [], None)
+                for index, cost in enumerate(costs):
+                    rows.append({
+                        "type": "message", "id": f"synthetic-{index}",
+                        "timestamp": f"2026-10-25T00:00:{index:02d}Z",
+                        "message": {"role": "assistant", "provider": "synthetic", "model": "synthetic",
+                                    "usage": {"input": 10, "output": 2, "cost": {"total": cost}}},
+                    })
+                self.write(self.root / "agents" / "fixture" / "sessions" / "session.jsonl", rows)
+                output = io.StringIO()
+                compiler.scan_openclaw(str(self.root), "fixture", output, compiler.Stats(), [], io.StringIO(), tool=tool)
+                events = [json.loads(line) for line in output.getvalue().splitlines()]
+                self.assertEqual([row["cost_usd"] for row in events[:3]], [0, 0.0, -0.0])
+                self.assertTrue(all(row["cost_usd"] is None for row in events[3:]))
+                event_path = self.root / "events.jsonl"
+                self.write(event_path, events)
+                for kind in ("sqlite", "json", "csv"):
+                    with self.subTest(kind=kind):
+                        st = ledger_store.Store.open(kind, str(self.root / f"{tool}-{kind}"))
+                        try:
+                            self.assertEqual(st.ingest_events_file(event_path), (len(events), 0))
+                            self.assertEqual(st.ingest_events_file(event_path), (0, len(events)))
+                            stored = list(st.iter_events())
+                            self.assertTrue(all(row["cost_usd"] is None for row in stored[3:]))
+                            self.assertEqual([float(row["cost_usd"]) for row in stored[:3]], [0, 0.0, -0.0])
+                        finally:
+                            st.close()
 
 
 if __name__ == "__main__":

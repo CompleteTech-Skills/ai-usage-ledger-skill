@@ -19,10 +19,13 @@ import csv
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import safety  # noqa: E402
@@ -50,9 +53,106 @@ def event_key(e):
 def event_id(e, seq):
     """Stable id: the tool's request id when it has one, else the natural key plus an ordinal among
     identical keys in the same source file. Logs are append-only, so re-scanning yields the same ids."""
+    identity = _claude_local_identity(e)
     if e.get("request_id"):
         return _sha("req", e.get("tool"), e.get("host"), e.get("request_id"))
+    if identity is not None:
+        return _identity_digest(["claude-ledger-v1", e.get("tool"), e.get("host"), identity["kind"], identity["digest"]])
     return _sha(*(event_key(e) + (seq,)))
+
+
+_CLAUDE_REBUILD = (
+    "Claude fallback identity is unavailable or ambiguous. No events were imported. "
+    "Preserve the existing store; rescan retained authorized Claude sources with the current scanner "
+    "into a distinct NEW store/workdir and compare counts and cache-TTL costs. "
+    "Do not combine that rebuilt ledger with the old export. Old exports cannot recover dropped usage; "
+    "missing source logs leave historical completeness unknown."
+)
+
+
+def _identity_digest(parts):
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _claude_local_identity(e):
+    """Require versioned scanner provenance for Claude rows without requestId.
+
+    Old scanner/store exports never retained message IDs or physical line positions.
+    Guessing an identity from their global ordinal can duplicate or misattribute usage.
+    Native provider request IDs, and every other tool, retain the existing ID path.
+    """
+    if e.get("tool") != "claude-code":
+        return None
+    request_id = e.get("request_id")
+    # Fallback provenance must never be reclassified as a native request after
+    # CSV converts False/0 to truthy text. Do not repair ambiguous old inputs.
+    if "ledger_identity" in e and request_id is not None:
+        raise ValueError("Claude fallback provenance requires a null request_id. " + _CLAUDE_REBUILD)
+    if request_id:
+        return None
+    identity = e.get("ledger_identity")
+    source = e.get("src")
+    if not isinstance(identity, dict) or set(identity) != {"version", "kind", "source_sha256", "line", "digest"}:
+        raise ValueError(_CLAUDE_REBUILD)
+    if (type(identity["version"]) is not int or identity["version"] != 1
+            or identity["kind"] not in ("native-message", "source-line")
+            or type(identity["line"]) is not int or identity["line"] < 1
+            or not isinstance(source, str) or not (source.startswith(("/", "\\\\")) or re.match(r"^[A-Za-z]:[\\/]", source))
+            or not isinstance(identity["digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", identity["digest"])
+            or identity["source_sha256"] != _identity_digest(["claude-source-v1", source])):
+        raise ValueError(_CLAUDE_REBUILD)
+    if identity["kind"] == "source-line" and identity["digest"] != _identity_digest(["claude-line-v1", source, identity["line"]]):
+        raise ValueError(_CLAUDE_REBUILD)
+    return identity
+
+
+def _claude_identity_evidence(e, identity):
+    # A native message may be replayed in a different file or streamed timestamp;
+    # preserve that replay behavior, but refuse conflicting charge evidence.
+    if identity["kind"] == "native-message":
+        keys = ("model", "input_uncached", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h",
+                "output", "reasoning", "total", "cost_usd", "service_tier")
+        evidence = {key: e.get(key) for key in keys if e.get(key) is not None}
+    else:
+        evidence = {key: value for key, value in e.items()
+                    if key not in ("id", "seq", "ingested_at", "ledger_identity") and value is not None}
+    # Compare the evidence that every backend can retain, not JSON-only scalar
+    # types. CSV maps empty known columns to None and other scalar metadata to
+    # text, while its extra JSON preserves types. Exact decimal tuples avoid
+    # rounding large counters and also equate integral floats/numeric cost text.
+    numeric = {"input_uncached", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h",
+               "output", "reasoning", "total", "cost_usd"}
+    canonical = {}
+    for key, value in evidence.items():
+        if key not in EVENT_COLUMNS:
+            canonical[key] = value
+        elif value == "":
+            continue
+        elif key in numeric:
+            canonical[key] = _exact_numeric_evidence(value)
+        else:
+            canonical[key] = str(value)
+    return _identity_digest(canonical)
+
+
+def _exact_numeric_evidence(value):
+    """Canonical finite numeric evidence without binary-float or context rounding."""
+    if type(value) is bool:
+        return ["invalid-bool", value]  # False is not a reported zero cost/count.
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        return ["unparsed", str(value)]
+    if not number.is_finite():
+        return ["unparsed", str(value)]
+    sign, digits, exponent = number.as_tuple()
+    if not any(digits):
+        return ["number", 0, "0", 0]
+    digits = list(digits)
+    while digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    return ["number", sign, "".join(map(str, digits)), exponent]
 
 
 def session_id(s):
@@ -65,6 +165,14 @@ def prompt_id(p):
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _stored_integer(value):
+    """Decode integer counts exactly, retaining legacy decimal/scientific text support."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(float(value))
 
 
 class Store:
@@ -83,31 +191,71 @@ class Store:
 
     # ---- shared ingest logic -------------------------------------------------
     def ingest_events_file(self, path):
-        """Append events from a scanner events.*.jsonl. Returns (added, skipped)."""
+        """Append scanner events after a complete, private, before-write preflight.
+
+        Legacy Claude fallback rows require an explicit new-store rebuild, not an
+        automatic rekey. A late identity/provenance failure cannot leave the earlier
+        5,000-row batches imported. The spool also freezes concurrent input changes.
+        """
         added = skipped = 0
         seq_by_key = {}
-        batch = []
-        with open(path, "rb") as fh:
-            for raw in fh:
-                try:
-                    e = json.loads(raw)
-                except Exception:
-                    continue
-                key = event_key(e)
-                seq = seq_by_key.get(key, 0)
-                seq_by_key[key] = seq + 1
-                e["seq"] = seq
-                e["id"] = event_id(e, seq)
-                batch.append(e)
-                if len(batch) >= 5000:
+        with tempfile.TemporaryDirectory(prefix="ledger-ingest-") as tmp:
+            # sqlite's default creation mode follows umask; create the spool 0600 first.
+            spool_path = os.path.join(tmp, "pending.sqlite")
+            safety.write_private(spool_path, "")
+            pending = sqlite3.connect(spool_path)
+            try:
+                pending.execute("CREATE TABLE pending (data TEXT, local_id TEXT, evidence TEXT)")
+                pending.execute("CREATE INDEX pending_local ON pending(local_id)")
+                affected = False
+                with open(path, "rb") as fh:
+                    for raw in fh:
+                        try:
+                            e = json.loads(raw)
+                        except Exception:
+                            continue
+                        identity = _claude_local_identity(e)
+                        key = event_key(e)
+                        seq = seq_by_key.get(key, 0)
+                        seq_by_key[key] = seq + 1
+                        e["seq"] = seq
+                        e["id"] = event_id(e, seq)
+                        local_id = e["id"] if identity is not None else None
+                        evidence = _claude_identity_evidence(e, identity) if identity is not None else None
+                        if identity is not None:
+                            affected = True
+                            prior = pending.execute("SELECT evidence FROM pending WHERE local_id=? LIMIT 1", (local_id,)).fetchone()
+                            if prior is not None and prior[0] != evidence:
+                                raise ValueError("Conflicting Claude local identity evidence; no events were imported.")
+                        pending.execute("INSERT INTO pending VALUES (?,?,?)", (json.dumps(e), local_id, evidence))
+                if affected:
+                    for stored in self.iter_events():
+                        if stored.get("tool") != "claude-code":
+                            continue
+                        identity = _claude_local_identity(stored)  # refuse legacy history before the first write
+                        if identity is None:
+                            continue
+                        local_id = event_id(stored, stored.get("seq", 0))
+                        if stored.get("id") != local_id:
+                            raise ValueError(_CLAUDE_REBUILD)
+                        incoming = pending.execute("SELECT evidence FROM pending WHERE local_id=? LIMIT 1", (local_id,)).fetchone()
+                        if incoming is not None and incoming[0] != _claude_identity_evidence(stored, identity):
+                            raise ValueError("Conflicting Claude local identity evidence; no events were imported.")
+                batch = []
+                for (data,) in pending.execute("SELECT data FROM pending ORDER BY rowid"):
+                    batch.append(json.loads(data))
+                    if len(batch) < 5000:
+                        continue
                     a, s = self._put_events(batch)
                     added += a
                     skipped += s
                     batch = []
-        if batch:
-            a, s = self._put_events(batch)
-            added += a
-            skipped += s
+                if batch:
+                    a, s = self._put_events(batch)
+                    added += a
+                    skipped += s
+            finally:
+                pending.close()
         return added, skipped
 
     def ingest_sessions_file(self, path):
@@ -275,7 +423,7 @@ class SqliteStore(Store):
             for k in ("seq", "input_uncached", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h", "output", "reasoning", "total"):
                 if e.get(k) not in (None, ""):
                     try:
-                        e[k] = int(float(e[k]))
+                        e[k] = _stored_integer(e[k])
                     except (TypeError, ValueError):
                         pass
             yield e
@@ -430,7 +578,7 @@ class FileStore(Store):
                     for k in ("seq", "input_uncached", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h", "output", "reasoning", "total", "calls", "user_msgs", "tool_calls", "bytes"):
                         if d.get(k) not in (None, ""):
                             try:
-                                d[k] = int(float(d[k]))
+                                d[k] = _stored_integer(d[k])
                             except (TypeError, ValueError):
                                 pass
                     yield d
