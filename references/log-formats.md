@@ -8,6 +8,7 @@ All figures come from per-call usage records the tool wrote at request time (cla
   `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`, `output_tokens_details.thinking_tokens`, and `cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens` (TTL split, needed for pricing).
 - `input_tokens` is **uncached** input (cache classes are separate). Contrast with Codex.
 - A streamed turn is written as several lines with the same `message.id` (one per content block). De-duplicate on that id across every file of the host.
+- `uuid` is the fallback when `message.id` is absent. Rows with neither identifier are retained separately; without a native identity the scanner cannot prove they are a replay.
 - `model` is on `message.model`; `<synthetic>` rows with zero usage are placeholders.
 - Line-level fields: `timestamp` (UTC ISO), `sessionId`, `cwd`, `version`, `entrypoint` (`cli`, `sdk-cli`), `effort`, `isSidechain`, `agentId`, `requestId`.
 - `~/.claude/history.jsonl`: one typed prompt per line (`display`, `timestamp` ms, `project`, `sessionId`).
@@ -41,6 +42,7 @@ All figures come from per-call usage records the tool wrote at request time (cla
 
 - `session` line (`cwd`), `model_change` (`provider`, `modelId`), `message` lines with `message.role`, `message.provider`, `message.model`, `message.usage.{input,output,cacheRead,cacheWrite,cost.total}`.
 - `<id>.checkpoint.<x>.jsonl` files replay the parent session; de-duplicate on (line id, timestamp) across files.
+- Preserve a recorded `cost.total` of zero as zero; missing or null cost remains unknown (`null`). These logged cost fields are separate from the report's API-equivalent estimate.
 
 ## Gemini CLI and Qwen Code (`~/.gemini/tmp/<project_hash>/chats/session-*.json[l]`, `~/.qwen/history/<hash>/`)
 

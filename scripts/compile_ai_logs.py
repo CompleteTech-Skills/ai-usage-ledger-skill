@@ -270,10 +270,11 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
                     if not usage:
                         continue
                     mid = msg.get("id") or d.get("uuid")
-                    if mid in seen_msg_ids:
+                    if mid and mid in seen_msg_ids:
                         stats.dedup += 1
                         continue
-                    seen_msg_ids.add(mid)
+                    if mid:
+                        seen_msg_ids.add(mid)
                     content = msg.get("content") or []
                     n_tool += sum(1 for c in content if isinstance(c, dict) and c.get("type") == "tool_use")
                     thinking = 0
@@ -737,7 +738,7 @@ def scan_openclaw(root, host, out, stats, session_meta, out_prompts, seen=None, 
                         tool, host, iso(ts), sid, "%s/%s" % (m.get("provider") or provider, m.get("model") or model),
                         input_uncached=u.get("input") or 0, cache_read=u.get("cacheRead") or 0, cache_write=u.get("cacheWrite") or 0,
                         output=u.get("output") or 0, reasoning=0, cwd=cwd, kind="main", entrypoint="openclaw:%s" % deploy,
-                        project=agent, cost_usd=cost if cost else None, src=path,
+                        project=agent, cost_usd=cost, src=path,
                     )
                     out.write(json.dumps(e) + "\n")
                     stats.events += 1
