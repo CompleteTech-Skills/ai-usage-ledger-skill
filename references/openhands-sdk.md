@@ -189,6 +189,23 @@ Source paths and request/conversation/model identifiers are retained metadata.
 POSIX directories/files use 0700/0600. Use an ACL-restricted parent on Windows.
 Existing output directories are refused.
 
+The raw adapter export is private, not anonymized. Use the existing
+`ledger.py export --anonymize` or `ledger.py run --anonymize` workflow before
+sharing ledger records: response IDs, request namespaces and usage-slot IDs are
+salted pseudonyms, and every `observed_sessions` entry uses the same pseudonym
+as the corresponding primary session. Source paths and `usage_source` are
+removed. Optional `observed_sessions` and `usage_ids` extras must be arrays of
+nonempty strings; null, scalar, mapping or malformed-array values are omitted
+from anonymized exports rather than copied or interpreted as identifiers.
+Empty arrays are preserved. JSON/JSONL exports retain token quantities, models
+and accounting-origin qualifications unchanged; the existing flat CSV export
+selects fixed columns and omits evidence extras. The original append-only store
+is not modified. The separate
+`openhands-coverage.json` can contain diagnostic source paths and is **not**
+processed by ledger anonymization: review/redact it separately before sharing,
+preserving its coverage and origin warnings. Normal publication approval and
+`publish-check` still apply.
+
 ## Identity and upstream coverage limits
 
 The request key hashes `(namespace, response_id)`; the store additionally keys by

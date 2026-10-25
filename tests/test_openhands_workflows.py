@@ -3,7 +3,9 @@
 Run in a full checkout. No personal configuration, SDK install, model call,
 credential discovery, real log scan, network request or scheduler is used.
 """
+import copy
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,7 @@ import ledger_query  # noqa: E402
 import ledger_store  # noqa: E402
 import openhands_usage as oh  # noqa: E402
 import scoped_report  # noqa: E402
+import anonymize  # noqa: E402
 
 
 PRICING = {"_as_of": "2024-06-15", "models": {
@@ -50,6 +53,137 @@ def batch():
 
 
 class OpenHandsWorkflowTests(unittest.TestCase):
+    def test_anonymized_export_omits_malformed_provenance_without_mutating_store(self):
+        malformed = [None, "private-scalar", {"private-key": "private-value"},
+                     42, ["private-id", None], [{"private-key": "private-value"}], [""]]
+        for kind in ("sqlite", "json", "csv"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "input.jsonl"
+                events = []
+                for i, value in enumerate(malformed):
+                    event = dict(batch().events[0], request_id="request-%d" % i,
+                                 observed_sessions=value, usage_ids=value)
+                    events.append(event)
+                source.write_text("".join(json.dumps(e) + "\n" for e in events))
+                before = source.read_bytes()
+                path = str(root / "store")
+                store = ledger_store.Store.open(kind, path)
+                try:
+                    self.assertEqual(store.ingest_events_file(str(source)), (len(events), 0))
+                    original = list(store.iter_events())
+                finally:
+                    store.close()
+                home = root / "home"
+                home.mkdir()
+                (home / "config.json").write_text(json.dumps({
+                    "store": {"kind": kind, "path": path},
+                    "anonymize": {"salt": "synthetic-salt"}}))
+                for fmt in ("json", "jsonl", "csv"):
+                    target = root / ("anonymous." + fmt)
+                    result = subprocess.run([sys.executable, str(ROOT / "scripts/ledger.py"),
+                        "export", "--table", "events", "--format", fmt,
+                        "--out", str(target), "--anonymize"], capture_output=True, text=True,
+                        env=dict(os.environ, AI_USAGE_LEDGER_HOME=str(home)), check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn("private-", target.read_text())
+                    if fmt != "csv":
+                        exported = (json.loads(target.read_text()) if fmt == "json" else
+                                    [json.loads(line) for line in target.read_text().splitlines()])
+                        self.assertEqual(len(exported), len(events))
+                        for row in exported:
+                            self.assertNotIn("observed_sessions", row)
+                            self.assertNotIn("usage_ids", row)
+                            self.assertEqual(row["total"], events[0]["total"])
+                self.assertEqual(source.read_bytes(), before)
+                store = ledger_store.Store.open(kind, path)
+                try:
+                    self.assertEqual(list(store.iter_events()), original)
+                    self.assertEqual(store.ingest_events_file(str(source)), (0, len(events)))
+                finally:
+                    store.close()
+
+    def test_anonymization_keeps_empty_and_absent_sdk_lists_compatible(self):
+        an = anonymize.Anonymizer("synthetic-salt")
+        event = batch().events[0]
+        self.assertEqual(an.event(event)["usage_ids"], [])
+        event["observed_sessions"] = []
+        self.assertEqual(an.event(event)["observed_sessions"], [])
+        for field in ("response_id", "request_namespace", "usage_ids", "observed_sessions"):
+            event.pop(field)
+        result = an.event(event)
+        for field in ("response_id", "request_namespace", "usage_ids", "observed_sessions"):
+            self.assertNotIn(field, result)
+        self.assertEqual(result["total"], event["total"])
+
+    def test_anonymized_exports_hide_sdk_identifiers_on_every_backend(self):
+        from test_openhands_usage import completion, stats, token_record
+
+        usage = oh.UsageBatch("private-host", namespace="private-namespace")
+        for session in ("private-conversation", "private-fork"):
+            usage.add_stats(stats(token_record("private-response")), conversation_id=session)
+        usage.add_completion_log({"kind": "LLMCompletionLogEvent",
+            "log_data": json.dumps(completion("private-response")),
+            "usage_id": "private-slot"}, conversation_id="private-conversation",
+            source="/private/source.json")
+        original = copy.deepcopy(usage.events)
+        an = anonymize.Anonymizer("synthetic-salt")
+        expected = an.event(original[0])
+        self.assertEqual(usage.events, original)
+        self.assertEqual(expected, anonymize.Anonymizer("synthetic-salt").event(original[0]))
+        other = anonymize.Anonymizer("other-salt").event(original[0])
+        for field in ("response_id", "request_namespace", "observed_sessions", "usage_ids"):
+            self.assertNotEqual(expected[field], other[field])
+        self.assertIn(expected["session"], expected["observed_sessions"])
+        self.assertEqual(len(set(expected["observed_sessions"])), 2)
+        for field in (*oh.BUCKETS, "total", "ts", "model", "model_aliases",
+                      "provider_usage_verified", "sdk_usage_origin", "usage_evidence",
+                      "sdk_reported_cost_usd", "sdk_cost_evidence"):
+            self.assertEqual(expected[field], original[0][field])
+        self.assertNotIn("usage_source", expected)
+        self.assertNotIn("private-", json.dumps(expected))
+
+        for kind in ("sqlite", "json", "csv"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = oh.write_batch(usage, root / "input")
+                before = source.read_bytes()
+                path = str(root / "store")
+                store = ledger_store.Store.open(kind, path)
+                try:
+                    self.assertEqual(store.ingest_events_file(str(source)), (1, 0))
+                    rows = list(store.iter_events())
+                finally:
+                    store.close()
+                home = root / "home"
+                home.mkdir()
+                (home / "config.json").write_text(json.dumps({
+                    "store": {"kind": kind, "path": path},
+                    "anonymize": {"salt": "synthetic-salt"}}))
+                for fmt in ("json", "jsonl", "csv"):
+                    target = root / ("anonymous." + fmt)
+                    result = subprocess.run([sys.executable, str(ROOT / "scripts/ledger.py"),
+                        "export", "--table", "events", "--format", fmt,
+                        "--out", str(target), "--anonymize"], capture_output=True, text=True,
+                        env=dict(os.environ, AI_USAGE_LEDGER_HOME=str(home)), check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn("private-", target.read_text())
+                    self.assertNotIn("/private/", target.read_text())
+                    if fmt != "csv":
+                        exported = (json.loads(target.read_text())[0] if fmt == "json"
+                                    else json.loads(target.read_text()))
+                        self.assertEqual(exported, an.event(rows[0]))
+                        for field in ("response_id", "request_namespace", "observed_sessions",
+                                      "usage_ids", "total", "provider_usage_verified"):
+                            self.assertEqual(exported[field], expected[field])
+                self.assertEqual(source.read_bytes(), before)
+                store = ledger_store.Store.open(kind, path)
+                try:
+                    self.assertEqual(list(store.iter_events()), rows)
+                    self.assertEqual(store.ingest_events_file(str(source)), (0, 1))
+                finally:
+                    store.close()
+
     def test_replay_reopen_query_export_and_scoped_report_on_every_backend(self):
         for kind in ("sqlite", "json", "csv"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
