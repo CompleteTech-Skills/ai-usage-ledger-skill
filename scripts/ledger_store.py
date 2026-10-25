@@ -67,6 +67,14 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _stored_integer(value):
+    """Decode integer counts exactly, retaining legacy decimal/scientific text support."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(float(value))
+
+
 class Store:
     """Facade over the three backends. Use Store.open(kind, path)."""
 
@@ -275,7 +283,7 @@ class SqliteStore(Store):
             for k in ("seq", "input_uncached", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h", "output", "reasoning", "total"):
                 if e.get(k) not in (None, ""):
                     try:
-                        e[k] = int(float(e[k]))
+                        e[k] = _stored_integer(e[k])
                     except (TypeError, ValueError):
                         pass
             yield e
@@ -430,7 +438,7 @@ class FileStore(Store):
                     for k in ("seq", "input_uncached", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h", "output", "reasoning", "total", "calls", "user_msgs", "tool_calls", "bytes"):
                         if d.get(k) not in (None, ""):
                             try:
-                                d[k] = int(float(d[k]))
+                                d[k] = _stored_integer(d[k])
                             except (TypeError, ValueError):
                                 pass
                     yield d
