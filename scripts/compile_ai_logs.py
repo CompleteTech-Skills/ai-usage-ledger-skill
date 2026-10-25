@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import csv
 import glob
+import hashlib
 import json
 import os
 import re
@@ -187,6 +188,17 @@ def walk_files(root, pattern):
                 yield os.path.join(dirpath, fn)
 
 
+def _claude_identity(source, line, native_id):
+    """Ledger-local provenance, never a fabricated provider request ID."""
+    def digest(parts):
+        return hashlib.sha256(json.dumps(parts, ensure_ascii=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {
+        "version": 1, "kind": "native-message" if native_id else "source-line",
+        "source_sha256": digest(["claude-source-v1", source]), "line": line,
+        "digest": digest(["claude-message-v1", native_id]) if native_id else digest(["claude-line-v1", source, line]),
+    }
+
+
 class Stats:
     def __init__(self):
         self.files = 0
@@ -214,6 +226,7 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
     if not os.path.isdir(proj_root):
         return
     for path in walk_files(proj_root, lambda f: f.endswith(".jsonl")):
+        path = os.path.abspath(path)
         stats.files += 1
         try:
             size = os.path.getsize(path)
@@ -233,7 +246,7 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
         n_tool = 0
         try:
             with open(path, "rb") as fh:
-                for raw in fh:
+                for line_number, raw in enumerate(fh, 1):
                     stats.lines += 1
                     if b'"usage"' not in raw and b'"type":"user"' not in raw and b'"cwd"' not in raw:
                         continue
@@ -270,10 +283,11 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
                     if not usage:
                         continue
                     mid = msg.get("id") or d.get("uuid")
-                    if mid in seen_msg_ids:
+                    if mid and mid in seen_msg_ids:
                         stats.dedup += 1
                         continue
-                    seen_msg_ids.add(mid)
+                    if mid:
+                        seen_msg_ids.add(mid)
                     content = msg.get("content") or []
                     n_tool += sum(1 for c in content if isinstance(c, dict) and c.get("type") == "tool_use")
                     thinking = 0
@@ -302,10 +316,14 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
                         entrypoint=entrypoint,
                         version=version,
                         effort=d.get("effort"),
-                        request_id=d.get("requestId"),
+                        # Already-falsy IDs are absent, not backend-dependent
+                        # values that CSV can turn into truthy request text.
+                        request_id=d.get("requestId") or None,
                         service_tier=usage.get("service_tier"),
                         src=path,
                     )
+                    if not e.get("request_id"):
+                        e["ledger_identity"] = _claude_identity(path, line_number, mid)
                     out.write(json.dumps(e) + "\n")
                     stats.events += 1
         except OSError as ex:
@@ -733,11 +751,15 @@ def scan_openclaw(root, host, out, stats, session_meta, out_prompts, seen=None, 
                     if isinstance(c, list):
                         n_tool += sum(1 for x in c if isinstance(x, dict) and x.get("type") in ("toolCall", "tool_use", "tool_call"))
                     cost = (u.get("cost") or {}).get("total")
+                    # Keep numeric zero, but retain the previous unknown-cost handling
+                    # for falsy malformed values (False, empty text or containers).
+                    if not cost and type(cost) not in (int, float):
+                        cost = None
                     e = event(
                         tool, host, iso(ts), sid, "%s/%s" % (m.get("provider") or provider, m.get("model") or model),
                         input_uncached=u.get("input") or 0, cache_read=u.get("cacheRead") or 0, cache_write=u.get("cacheWrite") or 0,
                         output=u.get("output") or 0, reasoning=0, cwd=cwd, kind="main", entrypoint="openclaw:%s" % deploy,
-                        project=agent, cost_usd=cost if cost else None, src=path,
+                        project=agent, cost_usd=cost, src=path,
                     )
                     out.write(json.dumps(e) + "\n")
                     stats.events += 1
