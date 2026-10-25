@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -63,6 +64,71 @@ def check_backends(scan_dir):
         good = a1 == n and s1 == 0 and a2 == 0 and s2 == n and a3 == 0 and s3 == n and got == base and pref == {"name": "Test"} and counts["events"] == n
         print("%-7s first %d/%d  second %d/%d  reopened %d/%d  totals %s  prefs %s  %s" % (kind, a1, s1, a2, s2, a3, s3, "match" if got == base else "DIFFER", "ok" if pref else "bad", "OK" if good else "FAIL"))
         ok = ok and good
+    return ok
+
+
+def check_precise_counts():
+    """Round-trip exact integers through every backend and the report JSONL export."""
+    ok = True
+    with tempfile.TemporaryDirectory(prefix="ledger-counts-") as tmp:
+        events = [
+            {"tool": "synthetic", "host": "test", "session": "counts", "request_id": "large",
+             "ts": "2026-10-25T00:00:00Z", "input_uncached": 2**53 + 1, "output": 2,
+             "total": 2**53 + 3, "cache_read": None, "cache_write": 0, "reasoning": None,
+             "native_usage": {"input_tokens": 2**53 + 1, "reasoning_tokens": None}},
+            {"tool": "synthetic", "host": "test", "session": "counts", "request_id": "largest",
+             "ts": "2026-10-25T00:00:01Z", "input_uncached": 2**63 - 1, "output": 0,
+             "total": 2**63 - 1, "cache_read": 0, "cache_write": None, "reasoning": 0},
+        ]
+        event_path = os.path.join(tmp, "events.test.jsonl")
+        with open(event_path, "w", encoding="utf-8") as fh:
+            fh.writelines(json.dumps(e) + "\n" for e in events)
+        session = {"tool": "synthetic", "host": "test", "session": "counts", "file": "session.jsonl",
+                   "bytes": 2**53 + 1, "calls": 2, "user_msgs": 0, "tool_calls": None}
+        session_path = os.path.join(tmp, "sessions.test.jsonl")
+        with open(session_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(session) + "\n")
+        for kind in ("sqlite", "json", "csv"):
+            path = os.path.join(tmp, kind)
+            st = ledger_store.Store.open(kind, path)
+            try:
+                added = st.ingest_events_file(event_path)
+                st.ingest_sessions_file(session_path)
+            finally:
+                st.close()
+            st = ledger_store.Store.open(kind, path)
+            try:
+                replay = st.ingest_events_file(event_path)
+                rows = list(st.iter_events())
+                saved_session = next(iter(st.iter_table("sessions")))
+                exported = ledger_store.export_jsonl(st, os.path.join(tmp, kind + "-export"))
+                with open(exported["events"][0], encoding="utf-8") as fh:
+                    exported_rows = [json.loads(line) for line in fh]
+                good = added == (2, 0) and replay == (0, 2) and st.counts()["events"] == 2
+                for expected, actual, exported_row in zip(events, rows, exported_rows):
+                    for key, value in expected.items():
+                        good = good and actual[key] == value and exported_row[key] == value
+                good = good and len(rows) == len(exported_rows) == 2 and saved_session["bytes"] == session["bytes"]
+                good = good and saved_session["tool_calls"] is None
+            finally:
+                st.close()
+            print("%-7s exact counts, unknowns, reopen/replay and export  %s" % (kind, "OK" if good else "FAIL"))
+            ok = ok and good
+        # Decimal/scientific text from older CSV/SQLite stores still normalises as before.
+        for kind in ("sqlite", "csv"):
+            path = os.path.join(tmp, kind + "-legacy")
+            st = ledger_store.Store.open(kind, path)
+            try:
+                legacy = dict(events[0], id="legacy", seq="0", input_uncached=str(2**53 + 1),
+                              output="2.0", total="1e3", cache_read=None, cache_write="0.0")
+                st._put_events([legacy])
+                row = next(iter(st.iter_events()))
+                good = (row["input_uncached"] == 2**53 + 1 and row["output"] == 2 and row["total"] == 1000
+                        and row["cache_read"] is None and row["cache_write"] == 0)
+            finally:
+                st.close()
+            print("%-7s integer and legacy numeric text  %s" % (kind, "OK" if good else "FAIL"))
+            ok = ok and good
     return ok
 
 
@@ -281,6 +347,7 @@ def main():
          "--vibe-root", os.path.join(FX, "vibe"), "--continue-root", os.path.join(FX, "continue"), "--pi-root", os.path.join(FX, "pi"),
          "--generic-root", "codebuff=" + os.path.join(FX, "generic")])
     ok = check_backends(scan_dir)
+    ok = check_precise_counts() and ok
     ok = check_cli(scan_dir) and ok
     print("STORE OK" if ok else "STORE CHECKS FAILED")
     return 0 if ok else 1
