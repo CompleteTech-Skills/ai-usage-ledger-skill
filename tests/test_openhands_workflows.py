@@ -53,6 +53,29 @@ def batch():
 
 
 class OpenHandsWorkflowTests(unittest.TestCase):
+    def test_merged_anonymizer_preserves_other_harness_privacy(self):
+        an = anonymize.Anonymizer("synthetic-salt")
+        records = [
+            dict(batch().events[0], ledger_identity={"digest": "private-digest"}),
+            {"tool": "mini-swe-agent", "host": "private-host", "session": "private-session",
+             "request_id": "private-request", "source_request_id": "private-source-request",
+             "invocation_id": "private-invocation", "run_id": "private-run",
+             "agent_id": "private-agent", "total": 120},
+            {"tool": "goose", "host": "private-host", "session": "private-session",
+             "total": 120, "goose": {"source_namespace": "private-namespace",
+                                       "native_session_id": "private-native-session",
+                                       "usage_id": "private-usage", "native_tokens": {"total_tokens": 120}}},
+        ]
+        original = copy.deepcopy(records)
+        anonymous = [an.event(record) for record in records]
+        self.assertEqual(records, original)
+        self.assertNotIn("ledger_identity", anonymous[0])
+        # The ledger request ID is namespaced; it is not the provider response ID.
+        self.assertNotEqual(anonymous[0]["request_id"], anonymous[0]["response_id"])
+        self.assertIn(anonymous[0]["session"], anonymous[0]["observed_sessions"])
+        self.assertNotIn("private-", json.dumps(anonymous))
+        self.assertEqual(anonymous[2]["goose"]["native_tokens"]["total_tokens"], 120)
+
     def test_anonymized_export_omits_malformed_provenance_without_mutating_store(self):
         malformed = [None, "private-scalar", {"private-key": "private-value"},
                      42, ["private-id", None], [{"private-key": "private-value"}], [""]]

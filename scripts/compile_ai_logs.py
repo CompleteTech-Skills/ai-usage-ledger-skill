@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import csv
 import glob
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,8 @@ try:
     import safety as _safety
 except ImportError:  # standalone copy on a remote host
     _safety = None
+
+import goose_usage  # noqa: E402 -- resolve sibling modules for importlib callers too
 
 _FALLBACK_CRED_BASENAMES = ("auth.json", ".credentials.json", "credentials.json", ".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 _FALLBACK_CRED_PATTERNS = re.compile(r"(?:^|[^a-z])(?:token|secret|credential|password|passwd|apikey|api_key)(?:[^a-z]|$)|\.pem$|\.key$|\.p12$|\.pfx$|^\.env\.|^id_rsa|^id_ed25519", re.IGNORECASE)
@@ -185,6 +188,17 @@ def walk_files(root, pattern):
                 yield os.path.join(dirpath, fn)
 
 
+def _claude_identity(source, line, native_id):
+    """Ledger-local provenance, never a fabricated provider request ID."""
+    def digest(parts):
+        return hashlib.sha256(json.dumps(parts, ensure_ascii=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {
+        "version": 1, "kind": "native-message" if native_id else "source-line",
+        "source_sha256": digest(["claude-source-v1", source]), "line": line,
+        "digest": digest(["claude-message-v1", native_id]) if native_id else digest(["claude-line-v1", source, line]),
+    }
+
+
 class Stats:
     def __init__(self):
         self.files = 0
@@ -212,6 +226,7 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
     if not os.path.isdir(proj_root):
         return
     for path in walk_files(proj_root, lambda f: f.endswith(".jsonl")):
+        path = os.path.abspath(path)
         stats.files += 1
         try:
             size = os.path.getsize(path)
@@ -231,7 +246,7 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
         n_tool = 0
         try:
             with open(path, "rb") as fh:
-                for raw in fh:
+                for line_number, raw in enumerate(fh, 1):
                     stats.lines += 1
                     if b'"usage"' not in raw and b'"type":"user"' not in raw and b'"cwd"' not in raw:
                         continue
@@ -268,10 +283,11 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
                     if not usage:
                         continue
                     mid = msg.get("id") or d.get("uuid")
-                    if mid in seen_msg_ids:
+                    if mid and mid in seen_msg_ids:
                         stats.dedup += 1
                         continue
-                    seen_msg_ids.add(mid)
+                    if mid:
+                        seen_msg_ids.add(mid)
                     content = msg.get("content") or []
                     n_tool += sum(1 for c in content if isinstance(c, dict) and c.get("type") == "tool_use")
                     thinking = 0
@@ -300,10 +316,14 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
                         entrypoint=entrypoint,
                         version=version,
                         effort=d.get("effort"),
-                        request_id=d.get("requestId"),
+                        # Already-falsy IDs are absent, not backend-dependent
+                        # values that CSV can turn into truthy request text.
+                        request_id=d.get("requestId") or None,
                         service_tier=usage.get("service_tier"),
                         src=path,
                     )
+                    if not e.get("request_id"):
+                        e["ledger_identity"] = _claude_identity(path, line_number, mid)
                     out.write(json.dumps(e) + "\n")
                     stats.events += 1
         except OSError as ex:
@@ -731,11 +751,15 @@ def scan_openclaw(root, host, out, stats, session_meta, out_prompts, seen=None, 
                     if isinstance(c, list):
                         n_tool += sum(1 for x in c if isinstance(x, dict) and x.get("type") in ("toolCall", "tool_use", "tool_call"))
                     cost = (u.get("cost") or {}).get("total")
+                    # Keep numeric zero, but retain the previous unknown-cost handling
+                    # for falsy malformed values (False, empty text or containers).
+                    if not cost and type(cost) not in (int, float):
+                        cost = None
                     e = event(
                         tool, host, iso(ts), sid, "%s/%s" % (m.get("provider") or provider, m.get("model") or model),
                         input_uncached=u.get("input") or 0, cache_read=u.get("cacheRead") or 0, cache_write=u.get("cacheWrite") or 0,
                         output=u.get("output") or 0, reasoning=0, cwd=cwd, kind="main", entrypoint="openclaw:%s" % deploy,
-                        project=agent, cost_usd=cost if cost else None, src=path,
+                        project=agent, cost_usd=cost, src=path,
                     )
                     out.write(json.dumps(e) + "\n")
                     stats.events += 1
@@ -1093,6 +1117,8 @@ def _usage_like(d):
 
 def _walk_usage(node, ctx, found, depth=0):
     """Yield (usage_dict, context) for every usage-like dict; ctx carries nearest model/timestamp/cost seen above."""
+    if goose_usage.is_goose_session(node):
+        return  # Goose exports/counters are never generic billable calls.
     if depth > 12:
         return
     if isinstance(node, dict):
@@ -1120,6 +1146,12 @@ def _walk_usage(node, ctx, found, depth=0):
             _walk_usage(v, ctx, found, depth + 1)
 
 
+def _is_mini_swe_source(value):
+    # These records require their own explicit source consent and deduplication.
+    return isinstance(value, dict) and (str(value.get("trajectory_format", "")).startswith("mini-swe-agent-")
+                                      or value.get("schema") == "mini-swe-agent-usage-1")
+
+
 def scan_generic(root, host, out, stats, session_meta, out_prompts, tool):
     """Best-effort reader for tools without a dedicated parser (pi, codebuff, droid, amp, LM Studio, ...).
     Reads every .json/.jsonl under root and emits one event per usage-shaped object. Verify on a sample.
@@ -1141,16 +1173,27 @@ def scan_generic(root, host, out, stats, session_meta, out_prompts, tool):
         try:
             if path.endswith(".jsonl"):
                 with open(path, "rb") as fh:
-                    for raw in fh:
+                    for line_number, raw in enumerate(fh):
                         stats.lines += 1
+                        if line_number == 0:
+                            try:
+                                if goose_usage.is_goose_session(json.loads(raw)):
+                                    break  # Legacy header owns the whole transcript, not just this line.
+                            except (ValueError, RecursionError):
+                                pass
                         if not any(k.encode() in raw for k in ("usage", "token", "Tokens")):
                             continue
                         try:
-                            _walk_usage(json.loads(raw), {}, found)
+                            document = json.loads(raw)
+                            if not _is_mini_swe_source(document):
+                                _walk_usage(document, {}, found)
                         except Exception:
                             stats.errors += 1
             else:
-                _walk_usage(json.load(open(path, encoding="utf-8", errors="replace")), {}, found)
+                with open(path, encoding="utf-8", errors="replace") as stream:
+                    document = json.load(stream)
+                if not _is_mini_swe_source(document):
+                    _walk_usage(document, {}, found)
                 stats.lines += 1
         except Exception:
             stats.errors += 1
@@ -1196,6 +1239,13 @@ def _generic_specs(specs):
 
 def cmd_scan(a):
     generic = _generic_specs(a.generic_root)  # refuses a home, drive root or broad directory before anything is opened or written
+    mini_roots = getattr(a, "mini_swe_root", None) or []
+    for root in mini_roots:
+        check_generic_root(os.path.realpath(os.path.expanduser(root)))
+    goose_specs = list(getattr(a, "goose_root", None) or []) + [root for tool, root in generic if tool == "goose"]
+    for spec in goose_specs:
+        goose_usage.split_root(spec)  # Validate all explicit paths before opening scan outputs.
+    generic = [(tool, root) for tool, root in generic if tool != "goose"]
     _private_dir(a.out_dir)
     stats = Stats()
     session_meta = []
@@ -1268,6 +1318,35 @@ def cmd_scan(a):
             n0, f0, b0, e0 = stats.events, stats.files, stats.bytes, stats.errors
             scan_continue(root, a.host, out, stats, session_meta, outp)
             inventory.append({"tool": "continue", "host": a.host, "root": root, "events": stats.events - n0, "files": stats.files - f0, "bytes": stats.bytes - b0, "errors": stats.errors - e0})
+        if mini_roots:
+            from mini_swe_usage import scan as scan_mini_swe
+            mini_seen = set()
+            for root in mini_roots:
+                n0, f0, b0, e0 = stats.events, stats.files, stats.bytes, stats.errors
+                scan_mini_swe(root, a.host, out, stats, session_meta, mini_seen)
+                inventory.append({"tool": "mini-swe-agent", "host": a.host, "root": root, "events": stats.events - n0,
+                                  "files": stats.files - f0, "bytes": stats.bytes - b0, "errors": stats.errors - e0, "prompts": 0})
+        goose_seen = set()
+        for spec in goose_specs:
+            events, coverage = goose_usage.collect(spec, a.host)
+            for e in events:
+                if e["request_id"] in goose_seen:
+                    stats.dedup += 1
+                    continue
+                goose_seen.add(e["request_id"])
+                out.write(json.dumps(e, allow_nan=False) + "\n")
+                stats.events += 1
+            stats.files += coverage["files"]
+            stats.bytes += coverage["bytes"]
+            stats.errors += coverage["errors"]
+            inventory.append(coverage)
+            by_session = defaultdict(list)
+            for e in events:
+                by_session[e["session"]].append(e)
+            for sid, rows in by_session.items():
+                session_meta.append({"tool": "goose", "host": a.host, "session": sid, "calls": len(rows),
+                                     "first_ts": min(e["ts"] for e in rows), "last_ts": max(e["ts"] for e in rows),
+                                     "file": None, "kind": "main", "model": rows[0]["model"] if len({e["model"] for e in rows}) == 1 else None})
         for tool, root in generic:
             n0, f0, b0, e0 = stats.events, stats.files, stats.bytes, stats.errors
             skipped = scan_generic(root, a.host, out, stats, session_meta, outp, tool)
@@ -1301,6 +1380,8 @@ def load_pricing(path):
 
 def price_event(e, pricing):
     """Return (api_cost_usd, cost_if_nothing_cached_usd, priced_as, assumed) for one event."""
+    if e.get("usage_pricing_eligible") is False:
+        return 0.0, 0.0, None, "Incomplete or estimated usage; token category sums may be partial"
     if not pricing:
         return 0.0, 0.0, None, None
     models = pricing.get("models", {})
@@ -1324,8 +1405,15 @@ def price_event(e, pricing):
                 assumed += ". " + fb["note"]
         if row is None:
             return 0.0, 0.0, None, "no price for %s" % model
+    if e.get("tool") == "mini-swe-agent" and e.get("partial"):
+        assumed = "; ".join(x for x in (assumed, "mini-SWE usage has missing/conflicting source fields; cost covers normalized categories only") if x)
     if row.get("assumed"):
         assumed = "; ".join(x for x in (assumed, row["assumed"]) if x)
+    if e.get("tool") == "goose":
+        note = "Goose API-equivalent estimate: unreported cache categories use uncached input; cache-write TTL uses the snapshot default; native cost evidence is separate"
+        assumed = "; ".join(x for x in (assumed, note) if x)
+        if row.get("use_logged_cost") and e.get("cost_usd") is None:
+            return 0.0, 0.0, None, "Goose has no currency-verified logged charge"
     if row.get("use_logged_cost"):
         c = float(e.get("cost_usd") or 0)
         return c, c, priced_as, assumed
@@ -1444,7 +1532,9 @@ def cmd_report(a):
     _private_dir(a.out_dir)
     cols = ["ts", "date", "tool", "host", "session", "kind", "model", "effort", "entrypoint", "version", "cwd",
             "input_uncached", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h", "output", "reasoning", "total",
-            "api_cost_usd", "cost_if_uncached_usd", "cache_savings_usd", "priced_as", "cost_usd", "plan", "account", "billing", "account_confidence", "request_id", "src"]
+            "api_cost_usd", "cost_if_uncached_usd", "cache_savings_usd", "priced_as", "cost_usd", "plan", "account", "billing", "account_confidence", "request_id", "src", "provider", "upstream_provider", "backend", "backend_library_version",
+            "execution_status", "source_calculated_cost", "provider_reported_cost", "cost_provenance", "provider_cost_provenance",
+            "timestamp_provenance", "model_provenance", "total_provenance", "unclassified_tokens", "partial", "usage_warnings"]
     NUM = ("input_uncached", "cache_read", "cache_write", "output", "reasoning", "total")
     COST = ("api_cost_usd", "cost_if_uncached_usd", "cache_savings_usd")
     pricing = load_pricing(a.pricing)
@@ -1471,6 +1561,7 @@ def cmd_report(a):
     }
     AC = load_accounts(a.accounts)
     n_events = 0
+    goose_report_seen = set()
     unsorted = os.path.join(a.out_dir, "all_events.unsorted.csv")
     with _private_open(unsorted, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
@@ -1485,6 +1576,11 @@ def cmd_report(a):
                             continue
                         if e.get("model") == "<synthetic>" and not e.get("total"):
                             continue  # Claude Code placeholder rows, no API call behind them
+                        if e.get("tool") == "goose" and e.get("request_id"):
+                            key = (e.get("host"), e["request_id"])
+                            if key in goose_report_seen:
+                                continue
+                            goose_report_seen.add(key)
                         n_events += 1
                         cost, nocache, priced_as, assumed = price_event(e, pricing)
                         e["api_cost_usd"] = round(cost, 6)
@@ -1805,6 +1901,8 @@ def main():
     s.add_argument("--kimi-root", action="append", help="Kimi Code data dir (~/.kimi or ~/.kimi-code)")
     s.add_argument("--vibe-root", action="append", help="Mistral Vibe home (~/.vibe)")
     s.add_argument("--continue-root", action="append", help="Continue home (~/.continue)")
+    s.add_argument("--mini-swe-root", action="append", help="explicitly authorized mini-SWE trajectory file or dedicated trajectory/usage directory; disabled by default")
+    s.add_argument("--goose-root", action="append", help="[source-id=]<sessions directory or database>: native Goose usage; metadata only, no source writes")
     s.add_argument("--generic-root", action="append", help="<tool>=<dir>: best-effort usage sniffing over JSON/JSONL (pi, codebuff, droid, amp, lmstudio, ...); the dir must be the tool's own directory, never a home, drive root or AppData/.config; credential-looking files are skipped")
     s.add_argument("--no-prompts", action="store_true", help="do not record prompt text: no prompts.<host>.jsonl is written and prompt-only history files are not opened (run_pipeline passes this unless the manifest sets capture_prompts: true)")
     s.add_argument("--out-dir", required=True)

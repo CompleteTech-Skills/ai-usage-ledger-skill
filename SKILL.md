@@ -6,7 +6,7 @@ version: 1.6.0
 metadata:
   openclaw:
     skillKey: ai-usage-ledger
-    homepage: https://github.com/CompleteTech-LLC/ai-usage-ledger-skill
+    homepage: https://github.com/CompleteTech-Skills/ai-usage-ledger-skill
     requires:
       bins:
         - python3
@@ -207,7 +207,8 @@ Relay this table to the operator, in chat or on the terminal, before the first o
 
 | Element | Rule |
 |---|---|
-| Event id | Tool request id when the tool records one (Claude message id); otherwise SHA-1 of tool, host, session, source file name, timestamp, model, the four token counts and an ordinal among identical keys in that file. Re-scanning an append-only log yields the same ids. |
+| Event id | Native request id when recorded (`requestId` for Claude). Claude rows without it use private versioned `ledger_identity`: a hashed message ID/UUID, or full producer source path plus physical line number for anonymous rows. This is not a fabricated provider ID. Other tools retain their existing natural-key/ordinal fallback. Re-scanning append-only logs at stable paths yields the same ids. |
+| Older Claude stores | Older rows without `requestId` lack the message/line provenance needed for safe rekeying. Affected ingestion refuses before any event in that input file is written. Keep the old store readable; explicitly rescan retained authorized sources into a distinct new store/workdir and compare counts and TTL-priced costs. Never union the old export into the rebuilt store. Missing logs mean unknown historical completeness. No automatic migration, aliasing, history rewrite or reinit occurs. [Identity and export boundaries](references/log-formats.md) apply. |
 | Ingest | `INSERT OR IGNORE` (SQLite) or an id index (JSON, CSV). Rows are never updated or deleted; a changed rule is applied at report time, not in the store. |
 | Sessions and prompts | Same scheme keyed on tool, host, session and file (sessions) or timestamp, session and text (prompts). |
 | Prefs and runs | Every preference is mirrored into the store; each `run` records what it added, skipped and produced. |
@@ -218,7 +219,7 @@ Relay this table to the operator, in chat or on the terminal, before the first o
 | Element | Rule |
 |---|---|
 | Replaced | Host names to `host-<6 hex>`, session and request ids to 12-hex digests, working directories to `project-<8 hex>`, account keys to `<tool>:acct-<6 hex>`, any path, URL or e-mail in a free-text field to `path-`/`user-` tokens. |
-| Removed | Source file paths, prompts, account labels, e-mails, organisations, evidence strings, host descriptions and the primary-host note in the report config. |
+| Removed | Source file paths, private ledger-local identity provenance, prompts, account labels, e-mails, organisations, evidence strings, host descriptions and the primary-host note in the report config. |
 | Kept | Tool, model, plan type, timestamps, token counts, costs, kind, entrypoint kind, version, effort: the study itself. |
 | Stability | Pseudonyms are SHA-256 of a private salt generated at onboarding, so reruns agree and outsiders cannot reverse them; the real-to-pseudonym map stays in `~/.ai-usage-ledger/anonymize-map.json`. |
 | Branding | The publisher's own branding stays on anonymised outputs; change it at onboarding if the publisher differs from the operator. |
@@ -290,3 +291,16 @@ Saved price files are persistent operator configuration and can lag the bundled 
 | Generated pages | The dashboard, study and documents are self-contained: no external fonts, images or stylesheets, and a `Content-Security-Policy` meta tag that forbids network loads. A remote logo or Google Fonts stylesheet is used only when `branding.allow_external_resources` is true. |
 | Publishing | Dashboards and study packages are published only when the operator asks (Artifacts, files, or a repository). |
 | Data | Scanned transcripts and the compiled ledger never leave the operator's machines through this skill. |
+
+## Goose native integration
+
+For Goose, use `goose_roots` and the dedicated native collector described in
+[the Goose guide](references/goose.md), not generic export totals. Observe normal
+onboarding/profile consent. The audited source is 1.54.0 with session schema 17;
+unknown schemas, carried-forward totals and legacy exports are coverage gaps,
+not guessed per-call usage. Keep provider inference/unknowns and native cost
+provenance separate from snapshot-priced API equivalents. Report inventory gaps
+alongside the dashboard. The read-only reader stages a private temporary DB/WAL
+copy (including raw transcript bytes) but retains only allowlisted usage metadata;
+disclose that transient-copy caveat where relevant. Do not enable prompts,
+credentials, other profiles, archives or schedules merely to validate it.

@@ -17,6 +17,10 @@ The ledger is the evidence member of the CompleteTech LLC skill family. It suppl
 
 [Onboarding](ONBOARDING.md) separates a safe fixture demonstration from real source onboarding. [BRANDING.md](BRANDING.md) describes presentation and downstream handoffs. The previous full README is preserved byte-for-byte in [REFERENCE.md](REFERENCE.md) for its catalog and examples; use the current **Before You Start** and **Core Workflow** in [SKILL.md](SKILL.md) for consent and operational boundaries. In particular, onboarding does not register a schedule: `schedule install` requires its own operator consent.
 
+## Muse Mesh integration
+
+[Native Muse usage and MCP reporting](references/muse-mesh.md) provides opt-in metadata collection, transactional replay-safe imports, and separately consented reports through Muse's existing MCP client. The guide includes an apply-ready upstream patch and a deterministic end-to-end example.
+
 ## OpenClaw / ClawHub Metadata
 
 | Field | Value |
@@ -25,7 +29,7 @@ The ledger is the evidence member of the CompleteTech LLC skill family. It suppl
 | Version | `1.6.0` |
 | Core runtime | `python3`; Python standard library |
 | Optional document libraries | See [requirements.txt](requirements.txt) for PDF, DOCX and preview dependencies |
-| Repository | `CompleteTech-LLC/ai-usage-ledger-skill` |
+| Repository | `CompleteTech-Skills/ai-usage-ledger-skill` |
 | Package contract | [skill-package.json](skill-package.json), schema 1 |
 
 The full GitHub checkout contains the logo and previews. A text-only registry bundle can omit binary assets; the new package validator targets the full checkout. This change does not publish a registry release.
@@ -128,3 +132,15 @@ The first two commands use only the standard library and test the checkout contr
 ## License
 
 Code, templates and documentation retain the [MIT license](LICENSE). Names, logos, seals and other brand assets remain subject to [BRAND_ASSETS.md](BRAND_ASSETS.md). No private assets or font files are added by this alignment.
+
+## Native Goose token tracking
+
+Goose session schema 17 (audited 1.54.0 source) is supported through the existing
+scanner and `goose_roots` manifest field. After normal onboarding and root review,
+`python scripts/ledger.py run --tools goose` collects native usage records;
+`--skip-tools goose` disables them for a run. No Goose changes or provider calls
+are needed. Existing SQLite/JSON/CSV stores, queries and snapshot-priced reports
+are reused. Session totals, legacy headers and exports are not extra billable
+calls. Provider attribution may be inferred or unavailable; native cost is not
+silently treated as billed USD. See [setup, mappings, privacy and validation](references/goose.md),
+including the private temporary DB/WAL snapshot and supported-version limits.

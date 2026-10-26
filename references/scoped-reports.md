@@ -32,6 +32,15 @@ Dollar metrics are API token equivalents using the supplied snapshot and its lis
 
 The report shows pricing provenance and assumptions alongside its metrics. It does not compare a partial-day total with lifetime tool counters or claim an intraday provider-counter validation.
 
+Stored mini-SWE-agent records marked `partial` that pass the report's existing
+token validation retain that qualification in scoped reports. Their cost covers
+the available normalized token categories, appears as an assumed estimate, and
+carries the missing/conflicting source-field warning in the HTML report, report
+data and event CSV. Existing total/component validation still applies: incomplete
+records whose total includes unclassified tokens can remain rejected. Unmarked
+legacy records and records explicitly marked complete keep their existing pricing
+behavior.
+
 ## Outputs and review
 
 Without `--out`, the command creates a new report directory under the configured working directory's `reports` tree. An explicit output directory must be new or empty; existing reports are not silently overwritten. The package contains:

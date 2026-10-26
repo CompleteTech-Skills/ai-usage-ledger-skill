@@ -113,9 +113,9 @@ def smoke_pipeline() -> None:
 
 
 def run_report_tests() -> None:
-    for pattern in ("test_pricing.py", "test_scoped_report.py"):
+    for pattern in ("test_pricing.py", "test_scoped_report.py", "test_package_mini_swe.py", "test_goose*.py"):
         run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", pattern, "-v"])
-    print("pricing and scoped report suites ok")
+    print("pricing, scoped report and Goose native suites ok")
 
 
 def run_fixture_suite() -> None:
@@ -243,7 +243,7 @@ def validate_clawhub_bundle() -> None:
     if openclaw.get("skillKey") != name:
         raise RuntimeError("metadata.openclaw.skillKey must match name")
     homepage = openclaw.get("homepage")
-    if not homepage or not str(homepage).startswith("https://github.com/CompleteTech-LLC/"):
+    if not homepage or not str(homepage).startswith(("https://github.com/CompleteTech-Skills/", "https://github.com/CompleteTech-LLC/")):
         raise RuntimeError("metadata.openclaw.homepage must point to the CompleteTech GitHub repo")
     requires = openclaw.get("requires") or {}
     bins = requires.get("bins") or []

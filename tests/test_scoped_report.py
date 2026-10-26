@@ -235,6 +235,48 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[1], results[2])
 
+    def test_partial_mini_swe_evidence_survives_each_store_and_report(self):
+        for kind in ("sqlite", "json", "csv"):
+            with self.subTest(kind=kind):
+                path = self.base / ("mini-swe-" + kind)
+                source = self.base / ("mini-swe-" + kind + ".jsonl")
+                records = [event(tool="mini-swe-agent", partial=True, request_id="partial"),
+                           event(tool="mini-swe-agent", partial=False, request_id="complete"),
+                           event(tool="mini-swe-agent", request_id="legacy")]
+                for record in records:
+                    record["unrelated_extra"] = "private-extra-never-export"
+                source.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+                store = ledger_store.Store.open(kind, str(path))
+                try:
+                    self.assertEqual(store.ingest_events_file(source), (3, 0))
+                finally:
+                    store.close()
+                stored_files = [path] if kind == "sqlite" else list(path.iterdir())
+                before = {p: p.read_bytes() for p in stored_files}
+                cfg = {"store": {"kind": kind, "path": str(path)}, "timezone": TZ,
+                       "workdir": str(self.base / "work"), "pricing_path": str(self.prices),
+                       "report_config_path": str(self.report_config)}
+
+                out, data = self.generate(cfg)
+
+                self.assertEqual(data["totals"]["calls"], 3)
+                self.assertEqual(data["totals"]["priced_calls"], 3)
+                self.assertEqual(data["totals"]["assumed_calls"], 1)
+                self.assertEqual(data["totals"]["assumed_tokens"], 370)
+                self.assertEqual(data["by_tool"]["mini-swe-agent"]["assumed_calls"], 1)
+                self.assertAlmostEqual(data["pricing"]["assumed_share_of_priced_cost"], 1 / 3)
+                warning = "mini-SWE usage has missing/conflicting source fields"
+                self.assertIn(warning, data["pricing"]["exceptions"][0]["note"])
+                self.assertIn(warning, (out / "report.html").read_text(encoding="utf-8"))
+                with (out / "events.csv").open(encoding="utf-8", newline="") as fh:
+                    rows = list(csv.DictReader(fh))
+                self.assertEqual([row["pricing_status"] for row in rows], ["assumed", "priced", "priced"])
+                self.assertIn(warning, rows[0]["pricing_note"])
+                for output in out.iterdir():
+                    self.assertNotIn("private-extra-never-export", output.read_text(encoding="utf-8"))
+                for stored, original in before.items():
+                    self.assertEqual(stored.read_bytes(), original)
+
     def test_no_default_query_limit(self):
         cfg = self.config([event(session="session-%d" % i) for i in range(120)])
         _, data = self.generate(cfg)

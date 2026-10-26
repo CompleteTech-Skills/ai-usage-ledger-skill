@@ -8,6 +8,12 @@ All figures come from per-call usage records the tool wrote at request time (cla
   `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`, `output_tokens_details.thinking_tokens`, and `cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens` (TTL split, needed for pricing).
 - `input_tokens` is **uncached** input (cache classes are separate). Contrast with Codex.
 - A streamed turn is written as several lines with the same `message.id` (one per content block). De-duplicate on that id across every file of the host.
+- `uuid` is the fallback when `message.id` is absent. Rows with neither identifier are retained separately; without a native identity the scanner cannot prove they are a replay.
+- Falsy `requestId` values (missing, null, empty string, false, numeric zero or empty container) are already treated as absent and are emitted as `request_id: null`. Truthy IDs, including the string `"0"`, keep their existing native-ID behavior. A normalized row carrying fallback `ledger_identity` must have a null/absent `request_id`; other values are refused before event writes, including text produced by older CSV conversions. Rescan authorized sources rather than editing historical rows. This is defensive absent-ID normalization, not acceptance of arbitrary malformed provider metadata.
+- For rows without `requestId`, `ledger_identity` is private ledger-local provenance, **not** a provider request ID: present message IDs/UUIDs share the existing native-ID namespace; otherwise the identity hashes the full producer source path and physical line number. Structured SHA-256 framing prevents delimiter collisions. These identities require append-only sources at stable paths; moving an unidentified source is not provable replay. Rewrites that reuse an identity with changed usage are refused.
+- Stores containing older Claude rows without `requestId` and without this provenance cannot safely accept the new fallback rows. Ingest refuses before writing any event from that input file, including when the incompatible row appears after a full batch. Read/report/export remain available. Preserve the old store and explicitly rebuild into a **distinct new store/workdir**, using the current scanner on retained authorized sources, then compare counts and cache-TTL costs. Do not union old exports into the rebuilt ledger. Old exports cannot recover dropped usage, and missing logs leave historical completeness unknown. No automatic migration, identity aliases, history rewrite, deletion or reinit occurs.
+- Native SQLite/JSON/CSV stores and JSON/JSONL exports preserve this private provenance. Anonymized exports remove it and are not re-ingest evidence. Public analysis CSV omits extra provenance fields and is likewise not a source for rebuilding these identities. Old scanner outputs and exports without valid provenance are refused even by a new store; rescan the retained sources instead. Native `requestId` events keep their existing identity behavior.
+- Identity conflict checks compare canonical retained evidence: known scalar columns follow CSV's empty/null and text representation, finite numeric counts/costs compare exactly without floating-point rounding, and extra JSON fields retain their types. Preflight is **single-writer and per input file**, not a transaction across an entire multi-host run. Concurrent Store writers are not serialized across preflight and insertion; a conflicting concurrent insert may be skipped rather than reported. Prevent overlapping writers; earlier input files may already have been ingested when a later file fails.
 - `model` is on `message.model`; `<synthetic>` rows with zero usage are placeholders.
 - Line-level fields: `timestamp` (UTC ISO), `sessionId`, `cwd`, `version`, `entrypoint` (`cli`, `sdk-cli`), `effort`, `isSidechain`, `agentId`, `requestId`.
 - `~/.claude/history.jsonl`: one typed prompt per line (`display`, `timestamp` ms, `project`, `sessionId`).
@@ -41,6 +47,7 @@ All figures come from per-call usage records the tool wrote at request time (cla
 
 - `session` line (`cwd`), `model_change` (`provider`, `modelId`), `message` lines with `message.role`, `message.provider`, `message.model`, `message.usage.{input,output,cacheRead,cacheWrite,cost.total}`.
 - `<id>.checkpoint.<x>.jsonl` files replay the parent session; de-duplicate on (line id, timestamp) across files.
+- Preserve a recorded `cost.total` of zero as zero; missing or null cost remains unknown (`null`). These logged cost fields are separate from the report's API-equivalent estimate.
 
 ## Gemini CLI and Qwen Code (`~/.gemini/tmp/<project_hash>/chats/session-*.json[l]`, `~/.qwen/history/<hash>/`)
 
@@ -79,3 +86,43 @@ All figures come from per-call usage records the tool wrote at request time (cla
 ## Normalised event schema (output of `scan`)
 
 `tool, host, ts, date, session, model, input_uncached, cache_read, cache_write, cache_write_5m, cache_write_1h, output, reasoning, total, cwd, project, kind (main|subagent), parent, entrypoint, version, effort, plan, credits, limit_id, archived, request_id, src` — then `report` adds `api_cost_usd, cost_if_uncached_usd, cache_savings_usd, priced_as, account, billing, account_confidence`.
+
+## mini-SWE-agent (explicit `--mini-swe-root`)
+
+`mini-swe-agent-1.1` trajectories keep successful Chat usage in
+`messages[].extra.response.usage`, Responses API usage in the response message's
+own `usage`, and rejected-action usage in the `FormatError` message's
+`extra.response.usage`. Do not sum `info.model_stats` with per-response records.
+The optional `mini-swe-agent-usage-1` exporter stores only allowlisted usage and
+provenance before pricing can fail. Its embedded `extra.mini_swe_usage` snapshot
+takes precedence over raw response usage, which the pinned Portkey adapter can
+mutate during cost calculation.
+
+Missing prices never discard tokens. Missing totals are labeled component sums;
+malformed totals never reconstruct prompt tokens by subtraction. Reasoning is
+already in output. Provider/model-scoped response IDs (or export UUIDs) deduplicate
+trajectory/export overlap and repeated ingestion; no-ID legacy records have
+explicitly weaker path-scoped guarantees. Generic sniffing excludes both mini
+formats so it cannot bypass consent or duplicate the dedicated parser.
+
+See [mini-SWE-agent integration](mini-swe-agent.md) for the backend/version matrix,
+complete category mappings, partial-data flags, concurrency, failure paths,
+privacy, and reconciliation commands.
+
+## Goose native SQLite (schema 17)
+
+`goose_roots` selects the dedicated reader, not generic JSON sniffing. The audited
+Goose 1.54.0 source persists immutable `usage_ledger` rows with `id`, `session_id`,
+`created_timestamp` (UTC seconds), `model`, nullable `input_tokens`, `output_tokens`,
+`total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost`, `cost_source`
+and `is_compaction`. Input includes both cache categories. Output is not increased
+by an invented reasoning count. Native currency, cache TTL, provider request ID
+and reasoning breakdown are unavailable. Historical provider is only a labelled
+unique-message-usage inference; the current session provider is never substituted.
+
+Class A native records, Class B `accumulated_*`/legacy/carried-forward counters and
+Class C snapshot-priced API estimates remain separate. Exports do not contain
+the immutable native ledger and are not billable input. Repeated scans reuse
+identities; growing sessions contribute only new usage rows. The bounded legacy
+JSONL first header is coverage-only, not a guessed final-session total or delta.
+See [Goose field mappings, versions, exclusions and privacy](goose.md).
