@@ -133,10 +133,14 @@ def iter_stored_events(kind, path):
         try:
             cursor = db.execute("SELECT %s, CASE WHEN tool='mu' AND version='mu-usage/1' "
                                 "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
-                                "'$.usage_pricing_eligible') END FROM events" % ", ".join(READ_FIELDS))
+                                "'$.usage_pricing_eligible') END, CASE WHEN tool='mini-swe-agent' "
+                                "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
+                                "'$.partial') END FROM events" % ", ".join(READ_FIELDS))
             for row in cursor:
-                event = dict(zip(READ_FIELDS, row[:-1]))
-                event["usage_pricing_eligible"] = False if row[-1] == 0 else None
+                event = dict(zip(READ_FIELDS, row[:-2]))
+                event["usage_pricing_eligible"] = False if row[-2] == 0 else None
+                if event["tool"] == "mini-swe-agent":
+                    event["partial"] = row[-1] == 1
                 yield event
         finally:
             db.close()
@@ -148,9 +152,14 @@ def iter_stored_events(kind, path):
                 if not isinstance(row, dict):
                     raise ValueError("event store contains a non-object record")
                 event = {key: row.get(key) for key in READ_FIELDS}
-                if row.get("tool") == "mu" and row.get("version") == "mu-usage/1":
+                is_mu = row.get("tool") == "mu" and row.get("version") == "mu-usage/1"
+                is_mini_swe = row.get("tool") == "mini-swe-agent"
+                if is_mu or is_mini_swe:
                     extra = json.loads(row.get("extra") or "{}") if kind == "csv" else row
-                    event["usage_pricing_eligible"] = extra.get("usage_pricing_eligible")
+                    if is_mu:
+                        event["usage_pricing_eligible"] = extra.get("usage_pricing_eligible")
+                    if is_mini_swe:
+                        event["partial"] = extra.get("partial") is True
                 yield event
     else:
         raise ValueError("unsupported store kind %r" % kind)
