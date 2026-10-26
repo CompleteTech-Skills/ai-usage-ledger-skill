@@ -35,7 +35,7 @@ TOKEN_FIELDS = ("input_uncached", "cache_read", "cache_write", "output", "reason
 TTL_FIELDS = ("cache_write_5m", "cache_write_1h")
 RATE_FIELDS = ("input", "cache_read", "cache_write_5m", "cache_write_1h", "output")
 READ_FIELDS = ("ts", "tool", "host", "session", "model", *TOKEN_FIELDS, *TTL_FIELDS, "cost_usd")
-EXPORT_FIELDS = ("ts", "tool", "model", *TOKEN_FIELDS, *TTL_FIELDS, "priced_as", "pricing_status",
+EXPORT_FIELDS = ("ts", "tool", "model", *TOKEN_FIELDS, "unclassified_tokens", *TTL_FIELDS, "priced_as", "pricing_status",
                  "pricing_note", "api_equivalent_usd", "without_cache_usd", "cache_savings_usd")
 COST_FIELDS = ("api_equivalent_usd", "without_cache_usd", "cache_savings_usd", "assumed_cost_usd")
 
@@ -135,12 +135,19 @@ def iter_stored_events(kind, path):
                                 "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
                                 "'$.usage_pricing_eligible') END, CASE WHEN tool='mini-swe-agent' "
                                 "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
-                                "'$.partial') END FROM events" % ", ".join(READ_FIELDS))
+                                "'$.partial') END, CASE WHEN tool='mini-swe-agent' "
+                                "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
+                                "'$.unclassified_tokens') END, CASE WHEN tool='mini-swe-agent' "
+                                "THEN json_type(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
+                                "'$.unclassified_tokens') END FROM events" % ", ".join(READ_FIELDS))
             for row in cursor:
-                event = dict(zip(READ_FIELDS, row[:-2]))
-                event["usage_pricing_eligible"] = False if row[-2] == 0 else None
+                event = dict(zip(READ_FIELDS, row[:-4]))
+                event["usage_pricing_eligible"] = False if row[-4] == 0 else None
                 if event["tool"] == "mini-swe-agent":
-                    event["partial"] = row[-1] == 1
+                    event["partial"] = row[-3] == 1
+                    # JSON1 extracts booleans as integers; preserve their type
+                    # so every backend rejects them as token counts below.
+                    event["unclassified_tokens"] = row[-1] == "true" if row[-1] in ("true", "false") else row[-2]
                 yield event
         finally:
             db.close()
@@ -160,6 +167,7 @@ def iter_stored_events(kind, path):
                         event["usage_pricing_eligible"] = extra.get("usage_pricing_eligible")
                     if is_mini_swe:
                         event["partial"] = extra.get("partial") is True
+                        event["unclassified_tokens"] = extra.get("unclassified_tokens")
                 yield event
     else:
         raise ValueError("unsupported store kind %r" % kind)
@@ -178,10 +186,19 @@ def _normalize(event):
     event = dict(event)
     for key in TOKEN_FIELDS:
         event[key] = _count(event.get(key), key)
+    unclassified = event.get("unclassified_tokens")
+    if unclassified is None:
+        unclassified = 0
+    if type(unclassified) is not int or unclassified < 0:
+        raise ValueError("invalid nonnegative integer token field: unclassified_tokens")
+    if unclassified and (event.get("tool") != "mini-swe-agent" or event.get("partial") is not True):
+        raise ValueError("unclassified tokens require explicit partial mini-SWE evidence")
+    event["unclassified_tokens"] = unclassified
     for key in TTL_FIELDS:
         value = event.get(key)
         event[key] = None if value in (None, "") else _count(value, key)
-    if event.get("usage_pricing_eligible") is not False and event["total"] != sum(event[key] for key in ("input_uncached", "cache_read", "cache_write", "output")):
+    categorized = sum(event[key] for key in ("input_uncached", "cache_read", "cache_write", "output"))
+    if event.get("usage_pricing_eligible") is not False and event["total"] != categorized + unclassified:
         raise ValueError("stored event total does not equal its token categories")
     if event["reasoning"] > event["output"]:
         raise ValueError("stored reasoning tokens exceed output tokens")
@@ -198,7 +215,7 @@ def _normalize(event):
 
 def _new_group():
     group = dict.fromkeys(("calls", "priced_calls", "unpriced_calls", "unpriced_tokens", "assumed_calls",
-                           "assumed_tokens", *TOKEN_FIELDS), 0)
+                           "assumed_tokens", *TOKEN_FIELDS, "unclassified_tokens"), 0)
     group.update({key: Decimal(0) for key in COST_FIELDS})
     return group
 
@@ -263,7 +280,7 @@ def collect(events, scope, pricing, generated_at):
             hosts.add(event["host"])
         for group in (totals, tools[event["tool"]], models[event["model"]]):
             group["calls"] += 1
-            for key in TOKEN_FIELDS:
+            for key in (*TOKEN_FIELDS, "unclassified_tokens"):
                 group[key] += event[key]
             group["unpriced_calls" if status == "unpriced" else "priced_calls"] += 1
             if status == "unpriced":
@@ -345,6 +362,13 @@ def render_report(data, pricing, brand, theme):
 
     scope, totals = data["scope"], data["totals"]
     priced_label = "API equivalent (priced calls only)" if totals["unpriced_calls"] else "API equivalent"
+    if totals["unclassified_tokens"]:
+        priced_label = "API equivalent (priced token categories only)"
+    token_rows = [[label, integer(totals[key])] for label, key in (
+        ("Uncached input", "input_uncached"), ("Cached input reads", "cache_read"),
+        ("Cache writes", "cache_write"), ("Output (includes reasoning)", "output"))]
+    if totals["unclassified_tokens"]:
+        token_rows.append(["Unclassified tokens (excluded from pricing)", integer(totals["unclassified_tokens"])])
     cache_pct = totals["cache_savings_usd"] / totals["without_cache_usd"] if totals["without_cache_usd"] else 0
     parts = ["# AI usage for the selected interval",
              "**%s through %s (%s); start inclusive, end %s.**" % (
@@ -361,7 +385,8 @@ def render_report(data, pricing, brand, theme):
              "These are API token equivalents using the supplied rate snapshot; rate tiers are listed below. "
              "They are not invoices or actual subscription charges. No additional tier or regional premiums are "
              "inferred. Unrecorded fees and unpriced calls are excluded from the dollar estimates. A configured "
-             "long-context rate is applied when its threshold is exceeded.",
+             "long-context rate is applied when its threshold is exceeded. Explicitly recorded unclassified "
+             "tokens remain in the token total but are excluded from pricing; their token category is unknown.",
              "## By tool",
              table(["Tool", "Calls", "Tokens", priced_label, "Cache savings", "Unpriced calls"], [
                  [key, integer(value["calls"]), integer(value["total"]), money(value["api_equivalent_usd"]),
@@ -371,10 +396,7 @@ def render_report(data, pricing, brand, theme):
              table(["Model", "Calls", "Tokens", priced_label, "Unpriced calls"], [
                  [key, integer(value["calls"]), integer(value["total"]), money(value["api_equivalent_usd"]),
                   integer(value["unpriced_calls"])] for key, value in data["by_model"].items()]),
-             "## Token breakdown", table(["Category", "Tokens"], [
-                 [label, integer(totals[key])] for label, key in (
-                     ("Uncached input", "input_uncached"), ("Cached input reads", "cache_read"),
-                     ("Cache writes", "cache_write"), ("Output (includes reasoning)", "output"))]),
+             "## Token breakdown", table(["Category", "Tokens"], token_rows),
              "## Stored-record freshness",
              "Generated: %s. Latest recorded event in the store: %s. Latest event in this interval: %s." % (
                  text(data["generated_at_utc"]), text(data["freshness"]["latest_recorded_event_utc"] or "none"),

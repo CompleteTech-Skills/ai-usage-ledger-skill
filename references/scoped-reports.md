@@ -32,14 +32,17 @@ Dollar metrics are API token equivalents using the supplied snapshot and its lis
 
 The report shows pricing provenance and assumptions alongside its metrics. It does not compare a partial-day total with lifetime tool counters or claim an intraday provider-counter validation.
 
-Stored mini-SWE-agent records marked `partial` that pass the report's existing
-token validation retain that qualification in scoped reports. Their cost covers
-the available normalized token categories, appears as an assumed estimate, and
-carries the missing/conflicting source-field warning in the HTML report, report
-data and event CSV. Existing total/component validation still applies: incomplete
-records whose total includes unclassified tokens can remain rejected. Unmarked
-legacy records and records explicitly marked complete keep their existing pricing
-behavior.
+Stored mini-SWE-agent records marked `partial` retain that qualification in scoped
+reports. Their cost covers the available normalized token categories, appears as
+an assumed estimate, and carries the missing/conflicting source-field warning in
+the HTML report, report data and event CSV. Explicit `unclassified_tokens` on a
+partial record are preserved in token totals and shown separately in the HTML,
+JSON aggregates and event CSV; they are excluded from price calculations. The
+report does not infer a missing category or invent an unclassified count from a
+total mismatch. The recorded total must equal the known categories plus the
+explicit unclassified count; mismatches and negative counts remain rejected.
+Unmarked legacy records and records explicitly marked complete keep their
+existing pricing behavior.
 
 ## Outputs and review
 
