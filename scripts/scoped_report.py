@@ -131,9 +131,17 @@ def iter_stored_events(kind, path):
     if kind == "sqlite":
         db = ledger_query.open_db(kind, str(path))
         try:
-            cursor = db.execute("SELECT %s FROM events" % ", ".join(READ_FIELDS))
+            cursor = db.execute("SELECT %s, CASE WHEN tool='mu' AND version='mu-usage/1' "
+                                "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
+                                "'$.usage_pricing_eligible') END, CASE WHEN tool='mini-swe-agent' "
+                                "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
+                                "'$.partial') END FROM events" % ", ".join(READ_FIELDS))
             for row in cursor:
-                yield dict(zip(READ_FIELDS, row))
+                event = dict(zip(READ_FIELDS, row[:-2]))
+                event["usage_pricing_eligible"] = False if row[-2] == 0 else None
+                if event["tool"] == "mini-swe-agent":
+                    event["partial"] = row[-1] == 1
+                yield event
         finally:
             db.close()
     elif kind in ("json", "csv"):
@@ -143,7 +151,16 @@ def iter_stored_events(kind, path):
             for row in rows:
                 if not isinstance(row, dict):
                     raise ValueError("event store contains a non-object record")
-                yield {key: row.get(key) for key in READ_FIELDS}
+                event = {key: row.get(key) for key in READ_FIELDS}
+                is_mu = row.get("tool") == "mu" and row.get("version") == "mu-usage/1"
+                is_mini_swe = row.get("tool") == "mini-swe-agent"
+                if is_mu or is_mini_swe:
+                    extra = json.loads(row.get("extra") or "{}") if kind == "csv" else row
+                    if is_mu:
+                        event["usage_pricing_eligible"] = extra.get("usage_pricing_eligible")
+                    if is_mini_swe:
+                        event["partial"] = extra.get("partial") is True
+                yield event
     else:
         raise ValueError("unsupported store kind %r" % kind)
 
@@ -164,7 +181,7 @@ def _normalize(event):
     for key in TTL_FIELDS:
         value = event.get(key)
         event[key] = None if value in (None, "") else _count(value, key)
-    if event["total"] != sum(event[key] for key in ("input_uncached", "cache_read", "cache_write", "output")):
+    if event.get("usage_pricing_eligible") is not False and event["total"] != sum(event[key] for key in ("input_uncached", "cache_read", "cache_write", "output")):
         raise ValueError("stored event total does not equal its token categories")
     if event["reasoning"] > event["output"]:
         raise ValueError("stored reasoning tokens exceed output tokens")

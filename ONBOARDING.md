@@ -15,7 +15,7 @@ Use the ledger for recorded AI usage, attribution, list-price estimates and evid
 Python 3.12 is the shared CI baseline. The core ledger, fixture workflow and package checks use the standard library; installing optional PDF/DOCX libraries is not necessary for the first demonstration.
 
 ```bash
-git clone https://github.com/CompleteTech-LLC/ai-usage-ledger-skill.git ai-usage-ledger
+git clone https://github.com/CompleteTech-Skills/ai-usage-ledger-skill.git ai-usage-ledger
 cd ai-usage-ledger
 python3 -m venv .venv
 . .venv/bin/activate
