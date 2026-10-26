@@ -134,7 +134,7 @@ def iter_stored_events(kind, path):
             cursor = db.execute("SELECT %s, CASE WHEN tool='mu' AND version='mu-usage/1' "
                                 "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
                                 "'$.usage_pricing_eligible') END, CASE WHEN tool='mini-swe-agent' "
-                                "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
+                                "THEN json_type(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
                                 "'$.partial') END, CASE WHEN tool='mini-swe-agent' "
                                 "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
                                 "'$.unclassified_tokens') END, CASE WHEN tool='mini-swe-agent' "
@@ -144,7 +144,7 @@ def iter_stored_events(kind, path):
                 event = dict(zip(READ_FIELDS, row[:-4]))
                 event["usage_pricing_eligible"] = False if row[-4] == 0 else None
                 if event["tool"] == "mini-swe-agent":
-                    event["partial"] = row[-3] == 1
+                    event["partial"] = row[-3] == "true"
                     # JSON1 extracts booleans as integers; preserve their type
                     # so every backend rejects them as token counts below.
                     event["unclassified_tokens"] = row[-1] == "true" if row[-1] in ("true", "false") else row[-2]

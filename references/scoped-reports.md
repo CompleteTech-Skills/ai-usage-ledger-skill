@@ -41,6 +41,8 @@ JSON aggregates and event CSV; they are excluded from price calculations. The
 report does not infer a missing category or invent an unclassified count from a
 total mismatch. The recorded total must equal the known categories plus the
 explicit unclassified count; mismatches and negative counts remain rejected.
+The `partial` flag must be the JSON boolean `true`; numeric or string lookalikes
+do not authorize unclassified tokens on any storage backend.
 Unmarked legacy records and records explicitly marked complete keep their
 existing pricing behavior.
 

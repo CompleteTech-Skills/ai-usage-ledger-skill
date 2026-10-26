@@ -356,6 +356,26 @@ class ArtifactTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "invalid.*unclassified_tokens"):
                         self.generate(cfg)
 
+    def test_unclassified_tokens_require_boolean_partial_on_every_backend(self):
+        for kind in ("sqlite", "json", "csv"):
+            for index, partial in enumerate((1, 1.0, "true", [True])):
+                with self.subTest(kind=kind, partial=partial):
+                    path = self.base / ("partial-flag-%s-%s" % (kind, index))
+                    source = self.base / ("partial-flag-%s-%s.jsonl" % (kind, index))
+                    record = event(tool="mini-swe-agent", partial=partial,
+                                   unclassified_tokens=50, total=420)
+                    source.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                    store = ledger_store.Store.open(kind, str(path))
+                    try:
+                        store.ingest_events_file(source)
+                    finally:
+                        store.close()
+                    cfg = {"store": {"kind": kind, "path": str(path)}, "timezone": TZ,
+                           "workdir": str(self.base / "work"), "pricing_path": str(self.prices),
+                           "report_config_path": str(self.report_config)}
+                    with self.assertRaisesRegex(ValueError, "explicit partial mini-SWE evidence"):
+                        self.generate(cfg)
+
     def test_no_default_query_limit(self):
         cfg = self.config([event(session="session-%d" % i) for i in range(120)])
         _, data = self.generate(cfg)
