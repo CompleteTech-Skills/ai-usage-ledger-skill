@@ -1,0 +1,51 @@
+name: Plandex native producer contract
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PLANDEX_BASE_DIR: ${{ github.workspace }}/.plandex-test-state
+      PLANDEX_TEST_EXPORT_DIR: ${{ runner.temp }}/plandex-native-exports
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ledger
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: plandex-ai/plandex
+          ref: e2d772072efadbe41d2946d97d79be55532dbab5
+          path: plandex
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+          cache-dependency-path: plandex/app/server/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply version-bound producer patch
+        working-directory: plandex
+        run: |
+          test "$(git rev-parse HEAD)" = e2d772072efadbe41d2946d97d79be55532dbab5
+          git apply --check --unidiff-zero ../ledger/integrations/plandex/usage-export.patch.txt
+          git apply --unidiff-zero ../ledger/integrations/plandex/usage-export.patch.txt
+          git diff --check
+      - name: Build complete server and check native transport accounting
+        working-directory: plandex/app/server
+        run: |
+          go build ./...
+          go test -race ./usageexport ./model -v
+      - name: Verify fresh producer exports through all ledger backends
+        working-directory: ledger
+        run: python tests/check_plandex_native.py --exports "$PLANDEX_TEST_EXPORT_DIR" --evidence "$RUNNER_TEMP/plandex-native-evidence.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plandex-native-reconciliation
+          path: ${{ runner.temp }}/plandex-native-evidence.json
+          if-no-files-found: error

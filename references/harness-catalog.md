@@ -34,7 +34,7 @@ Generic sniffer boundary: `--generic-root <tool>=<dir>` reads every `.json` / `.
 | Kilo CLI | `${KILO_DATA_DIR:-~/.local/share/kilo}` | opencode-derived | as opencode (verify) | generic |
 | ZCode | `${ZCODE_HOME:-~/.zcode}` | verify | verify | generic |
 | OpenClaw gateways | `<config>/agents/<agent>/sessions/*.jsonl`; `${OPENCLAW_DIR:-~/.openclaw}` | JSONL | `message.usage.{input,output,cacheRead,cacheWrite,cost.total}`; checkpoint files replay | built-in |
-| Plandex | explicitly approved local self-hosted export files; no stock PostgreSQL/client-state backfill | proposed `plandex-usage/1` attempt records; requires separate upstream extension | nullable input/output/cache/reasoning and native cost evidence; unverified gateway usage is coverage-only | experimental `collect_plandex.py`; [scope, source format and version limits](plandex-self-hosted.md) |
+| Plandex | explicitly approved local self-hosted export files; no stock PostgreSQL/client-state backfill | `plandex-usage/1` attempt records; requires the bundled pinned server patch | nullable input/output/cache/reasoning and native cost evidence; unverified gateway usage is coverage-only | experimental `collect_plandex.py`; [scope, source format and version limits](plandex-self-hosted.md) |
 | Jules CLI / Devin CLI | cloud agents; Devin desktop keeps `~/.config/Devin/User/acp-events/` (`~/Library/Application Support/Devin/...`) | ACP event JSON | verify | generic |
 | Warp agent mode | local conversation store (path undocumented; cloud sync optional) | – | none published | none |
 

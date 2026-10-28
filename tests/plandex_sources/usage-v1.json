@@ -1,5 +1,5 @@
 {
-  "origin": "Go usageexport.TestInteropExport; synthetic provider responses only",
+  "origin": "Legacy expected-format fixture; synthetic provider responses only",
   "schema": "plandex-usage-fixture/1",
   "records": [
     {

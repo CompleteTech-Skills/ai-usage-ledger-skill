@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -392,6 +393,40 @@ class PlandexTests(unittest.TestCase):
             collector.collect(self.config, str(self.output), "sqlite", str(self.source))
         with self.assertRaises(collector.CollectionError):
             collector.collect(self.config, str(self.output), "sqlite", str(self.output / "checkpoint.sqlite"))
+
+    def test_store_cannot_alias_collector_artifacts_or_their_directories(self):
+        self.write([invocation()])
+        before = self.source.read_bytes()
+        names = ("coverage.json", "coverage-records.jsonl", "events.plandex.jsonl",
+                 "checkpoint.sqlite", "checkpoint.sqlite-wal", "nested/ledger.sqlite")
+        for name in names:
+            with self.subTest(name=name), self.assertRaisesRegex(collector.CollectionError, "outside"):
+                collector.collect(self.config, self.output, "sqlite", self.output / name)
+            self.assertFalse(self.output.exists(), "reject before creating any collector files")
+        for kind in ("json", "csv"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(collector.CollectionError, "outside"):
+                collector.collect(self.config, self.output, kind, self.root)
+            self.assertFalse(self.output.exists())
+        self.assertEqual(self.source.read_bytes(), before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_output_junction_cannot_replace_source_export(self):
+        source_dir = self.root / "source"
+        source_dir.mkdir()
+        self.source = source_dir / "events.plandex.jsonl"
+        self.config["sources"][0]["files"] = [str(self.source)]
+        self.write([invocation()])
+        before = self.source.read_bytes()
+        alias = self.root / "output-alias"
+        result = subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(source_dir)],
+                                capture_output=True, text=True, check=False)
+        if result.returncode:
+            self.skipTest("junction creation unavailable")
+        self.assertTrue(alias.is_junction())
+        with self.assertRaisesRegex(collector.CollectionError, "reparse"):
+            collector.collect(self.config, alias)
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual(list(source_dir.iterdir()), [self.source])
 
     def test_changed_scope_requires_new_checkpoint(self):
         self.write([invocation()])

@@ -75,6 +75,12 @@ def local_path(value, suffix=None):
     for ancestor in [path] + list(path.parents):
         if ancestor.is_symlink():
             raise CollectionError("symlink paths are not supported")
+        try:
+            attributes = getattr(ancestor.lstat(), "st_file_attributes", 0)
+        except FileNotFoundError:
+            continue
+        if attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
+            raise CollectionError("reparse point paths, including junctions, are not supported")
     return path
 
 
@@ -381,6 +387,10 @@ def collect(config, out_dir, store_kind=None, store_path=None):
     cache = output / "checkpoint.sqlite"
     if store_path:
         destination = local_path(str(store_path))
+        if destination == output or output in destination.parents:
+            raise CollectionError("ledger store must be outside the collector output directory")
+        if store_kind != "sqlite" and destination in output.parents:
+            raise CollectionError("collector output must be outside the ledger store directory")
         if str(destination) in paths or destination == cache:
             raise CollectionError("ledger store, checkpoint and source files must be separate")
         if any(destination == d or d in destination.parents or destination in d.parents for d in directories):
