@@ -15,6 +15,10 @@ Compile recorded AI coding-agent usage into an append-only, de-duplicated, price
 
 The ledger is the evidence member of the CompleteTech LLC skill family. It supplies usage and cost evidence to discovery, delivery and billing workflows; it does not issue invoices or authorize charging a client. Its activation key is **`ai-usage-ledger`**, not the repository name.
 
+## Full-conversation export
+
+Use `python scripts/ledger.py conversation export --source <selected-transcript.jsonl> --out <new-directory>` to gather recorded messages and tool calls/results into private JSON and Markdown transcripts. `conversation list --source <file>` shows the sessions present. These explicit full-content operations leave usage capture settings and the ledger unchanged. See [supported formats, consent and coverage](references/conversation-export.md).
+
 [Onboarding](ONBOARDING.md) separates a safe fixture demonstration from real source onboarding. [BRANDING.md](BRANDING.md) describes presentation and downstream handoffs. The previous full README is preserved byte-for-byte in [REFERENCE.md](REFERENCE.md) for its catalog and examples; use the current **Before You Start** and **Core Workflow** in [SKILL.md](SKILL.md) for consent and operational boundaries. In particular, onboarding does not register a schedule: `schedule install` requires its own operator consent.
 
 ## Muse Mesh integration

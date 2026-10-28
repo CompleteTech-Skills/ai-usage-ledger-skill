@@ -39,6 +39,8 @@ Before `ledger.py init`, relay the complete **Before You Start** table in [SKILL
 
 Prompt text, credential-file identity claims, identifiable accounts and raw-log archiving default off. Do not enable them merely because the library is installed. Scheduling is a separate `schedule install` operation requiring operator confirmation; choosing preferences or running package validation does not install a task.
 
+The [full-conversation export](references/conversation-export.md) is a separate explicit operation over selected transcript files. It reads message and tool content only when requested for those files; it does not enable prompt capture, raw-log archiving or schedules. Do not run it on personal transcripts as an installation test.
+
 ## Branding and downstream use
 
 Keep neutral branding unless an approved identity is selected. Use the existing `--brand-preset completetech` onboarding option or [CompleteTech report configuration](examples/report_config.completetech.json) for authorized company output. Optional PDF/DOCX generation uses [requirements.txt](requirements.txt). Do not synthesize logos, fetch fonts or redistribute private assets.

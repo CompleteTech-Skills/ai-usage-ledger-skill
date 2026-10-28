@@ -10,6 +10,12 @@ The validator compiles Python files, runs Ruff, parses YAML/JSON files, renders 
 
 GitHub Actions runs the same validator on push and pull request.
 
+The gate also runs `test_conversation_export.py` using synthetic Codex, Claude,
+pi and standard message histories. It checks message/tool preservation, repeated
+turns and mirrored events, gzip inputs, partial-history disclosures, read-only
+sources, private nonoverwriting outputs and the `ledger.py conversation` CLI.
+It does not read personal transcripts or establish complete historical coverage.
+
 The gate also runs synthetic pricing and scoped-report tests. These cover local-midnight and daylight-saving boundaries, timestamp cutoffs, cached-token arithmetic and context pricing, report-only price overrides, read-only store access, private artifacts and HTML escaping. They do not scan personal agent logs or certify provider billing totals.
 
 The same gate also runs `test_goose*.py`. A separate read-only GitHub Actions

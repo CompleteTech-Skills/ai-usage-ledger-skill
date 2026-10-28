@@ -236,6 +236,21 @@ Relay this table to the operator, in chat or on the terminal, before the first o
 | Reading back | `archive grep` streams through gzip and reports file, line and the timestamp found on the line; `archive restore` decompresses a host (or a path match) into a directory that the scanners can read again. |
 | Size | Expect the size of the tools' log trees (tens of GB for heavy Codex use) at roughly one tenth when compressed. Say so before enabling it on a small disk. |
 
+## Full-Conversation Export
+
+Use `python3 scripts/ledger.py conversation list --source <file>` or
+`conversation export --source <file> --out <new-directory>` when the operator
+explicitly requests the recorded conversation, including assistant messages and
+tool calls/results. These commands read full content from the selected local
+JSON/JSONL files (including gzip copies), not just usage counts. Obtain the
+operator's authorization for those source files before using real transcripts;
+installation and package tests do not grant it. Existing prompt/archive settings
+are not changed, and no source discovery, remote access or scheduling occurs.
+Use synthetic fixtures to validate the feature. See the
+[conversation-export guide](references/conversation-export.md) for formats,
+partial-history behavior and private outputs. Never promise recovery of deleted
+content, hidden reasoning or attachment bytes that are absent from the sources.
+
 ## Answering Detailed Questions
 
 | Question shape | Command |
