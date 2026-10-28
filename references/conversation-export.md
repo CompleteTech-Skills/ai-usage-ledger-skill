@@ -39,6 +39,13 @@ combine different branches or infer chronological ordering across files.
 | JSON message arrays or a `messages` envelope | Standard role/content messages, system/developer messages, tool/function calls and results. Includes Gemini-style user/`gemini` entries and Cline API message histories. |
 | Gzip copies of the above | Decompressed in memory without modifying the archive or its index. Select an existing `.json.gz` or `.jsonl.gz` file directly. |
 
+Codex metadata also supplies recorded instruction messages: `base_instructions.text`
+and legacy `instructions` become system records; `developer_instructions` and
+`user_instructions` in turn context retain their respective roles. These appear
+as `recorded_instructions` in source order, including repeated per-turn text.
+Other runtime configuration and instruction-provenance objects are not copied.
+An unrecognized instruction shape is a coverage gap, not silently omitted text.
+
 `--tool auto` detects the above shapes. An explicit `--tool codex|claude-code|pi|messages`
 selects the parser. This does not promise support for every harness's raw format.
 Usage-only records and a prompt-only history cannot reconstruct full conversations.

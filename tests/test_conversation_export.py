@@ -75,6 +75,69 @@ class ConversationExportTests(unittest.TestCase):
         self.assertEqual(result["messages"][1]["content"][1]["type"], "input_image")
         self.assertEqual(conversation.gather([source], session="two")["messages"][0]["content"][0]["text"], "second session")
 
+    def test_codex_recorded_instructions_survive_metadata_in_source_order(self):
+        rows = [
+            {"type": "session_meta", "payload": {"id": "one", "base_instructions": {
+                "text": "Recorded system instructions", "provenance": {"private": "do not export configuration"}},
+                "api_key": "do not export configuration"}},
+            {"type": "turn_context", "payload": {"developer_instructions": "Recorded developer instructions",
+                                                     "user_instructions": "Recorded user instructions"}},
+            codex_message("user", "ordinary conversation"),
+            {"type": "session_meta", "payload": {"id": "two", "instructions": "Legacy system instructions"}},
+            {"type": "turn_context", "payload": {"developer_instructions": None, "user_instructions": None}},
+        ]
+        source = self.source(rows, "instructions.jsonl")
+        original = source.read_bytes()
+        result = conversation.gather([source])
+        self.assertEqual([item["role"] for item in result["messages"]], ["system", "developer", "user", "user", "system"])
+        instructions = [item for item in result["messages"] if item["kind"] == "recorded_instructions"]
+        self.assertEqual([item["content"] for item in instructions], ["Recorded system instructions", "Recorded developer instructions",
+                                                                     "Recorded user instructions", "Legacy system instructions"])
+        self.assertEqual([item["session"] for item in instructions], ["one", "one", "one", "two"])
+        self.assertFalse(result["coverage"]["partial"])
+        output = conversation.export(result, self.root / "instructions-export")
+        for name in ("conversation.json", "conversation.md"):
+            text = (output / name).read_text()
+            for item in instructions:
+                self.assertIn(item["content"], text)
+            self.assertNotIn("do not export configuration", text)
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_malformed_instruction_content_is_an_explicit_gap(self):
+        source = self.source([
+            {"type": "session_meta", "payload": {"id": "one", "base_instructions": {"provenance": "not text"}}},
+            {"type": "turn_context", "payload": {"developer_instructions": ["wrong shape"]}},
+            codex_message("user", "available message")], "malformed-instructions.jsonl")
+        with self.assertRaisesRegex(conversation.ConversationError, "allow-partial"):
+            conversation.gather([source])
+        result = conversation.gather([source], allow_partial=True)
+        self.assertEqual([gap["code"] for gap in result["coverage"]["gaps"]],
+                         ["unsupported_instruction_content", "unsupported_instruction_content"])
+
+    def test_unidentified_ui_events_do_not_scan_all_canonical_messages(self):
+        lookups = []
+
+        class CountedMessage(dict):
+            def get(self, key, default=None):
+                if key == "id":
+                    lookups.append(key)
+                return super().get(key, default)
+
+        original = conversation.message
+
+        def tracked(*args, **kwargs):
+            item = original(*args, **kwargs)
+            return CountedMessage(item) if item is not None else None
+
+        rows = []
+        for index in range(200):
+            rows.extend([codex_message("user", str(index)),
+                         {"type": "event_msg", "payload": {"type": "user_message", "message": str(index)}}])
+        with mock.patch.object(conversation, "message", side_effect=tracked):
+            result = conversation.gather([self.source(rows, "many-events.jsonl")])
+        self.assertEqual(len(result["messages"]), len(rows))
+        self.assertLessEqual(len(lookups), len(rows))
+
     def test_claude_preserves_all_content_blocks_and_branch_ids(self):
         blocks = [{"type": "text", "text": "Checking"}, {"type": "thinking", "thinking": "Recorded summary"},
                   {"type": "tool_use", "id": "tool-1", "name": "Read", "input": {"file_path": "synthetic.txt"}}]
