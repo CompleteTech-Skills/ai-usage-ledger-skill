@@ -8,10 +8,11 @@ jobs:
   native:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      PLANDEX_BASE_DIR: ${{ github.workspace }}/.plandex-test-state
-      PLANDEX_TEST_EXPORT_DIR: ${{ runner.temp }}/plandex-native-exports
     steps:
+      - name: Configure isolated test paths
+        run: |
+          echo "PLANDEX_BASE_DIR=$RUNNER_TEMP/plandex-server-state" >> "$GITHUB_ENV"
+          echo "PLANDEX_TEST_EXPORT_DIR=$RUNNER_TEMP/plandex-native-exports" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           path: ledger
