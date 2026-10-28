@@ -23,3 +23,5 @@ jobs:
         run: npm install -g @mermaid-js/mermaid-cli pyright
       - name: Run quality validation
         run: python scripts/validate_quality.py
+      - name: Plandex synthetic collector, store, pricing and report tests
+        run: python -m unittest discover -s tests -p 'test_plandex*.py' -v

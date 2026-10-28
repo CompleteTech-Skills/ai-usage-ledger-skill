@@ -1,0 +1,12 @@
+{
+  "schema": "plandex-collector/1",
+  "approved_project_scope": false,
+  "sources": [
+    {
+      "source_id": "operator-chosen-server-id",
+      "versions": ["git:REPLACE_WITH_VERIFIED_SERVER_REVISION"],
+      "project_ids": ["REPLACE_WITH_APPROVED_PROJECT_ID"],
+      "directories": ["/srv/approved-plandex-usage-exports"]
+    }
+  ]
+}

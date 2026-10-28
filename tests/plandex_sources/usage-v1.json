@@ -1,0 +1,122 @@
+{
+  "origin": "Legacy expected-format fixture; synthetic provider responses only",
+  "schema": "plandex-usage-fixture/1",
+  "records": [
+    {
+      "schema": "plandex-usage/1",
+      "kind": "attempt_start",
+      "granularity": "attempt",
+      "source_id": "synthetic-server",
+      "plandex_version": "2.2.1+usage-export.1",
+      "attempt_id": "37333e21b70bbc80f16a0f902755834c",
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "ts": "2026-10-12T20:11:48.663712466Z",
+      "usage_basis": "unavailable",
+      "token_semantics": "inclusive_input_output",
+      "usage": null,
+      "native_cost": null,
+      "project_id": "project-a",
+      "plan_id": "plan-a",
+      "session_id": "session-a",
+      "execution_id": "execution-a",
+      "step_id": "step-a",
+      "build_id": "build-a"
+    },
+    {
+      "schema": "plandex-usage/1",
+      "kind": "attempt",
+      "granularity": "attempt",
+      "source_id": "synthetic-server",
+      "plandex_version": "2.2.1+usage-export.1",
+      "attempt_id": "37333e21b70bbc80f16a0f902755834c",
+      "native_request_id": "native-response",
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "ts": "2026-10-12T20:11:48.663712466Z",
+      "finished_at": "2026-10-12T20:11:48.663852959Z",
+      "status": "completed",
+      "usage_basis": "provider_reported",
+      "token_semantics": "inclusive_input_output",
+      "usage": {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "cache_read_tokens": 200,
+        "cache_write_tokens": 50,
+        "reasoning_tokens": 30
+      },
+      "raw_usage": {
+        "cache_write_tokens": 50,
+        "cached_tokens": 200,
+        "completion_tokens": 100,
+        "prompt_tokens": 1000,
+        "reasoning_tokens": 30,
+        "total_tokens": 1100
+      },
+      "native_cost": null,
+      "project_id": "project-a",
+      "plan_id": "plan-a",
+      "session_id": "session-a",
+      "execution_id": "execution-a",
+      "step_id": "step-a",
+      "build_id": "build-a"
+    },
+    {
+      "schema": "plandex-usage/1",
+      "kind": "attempt_start",
+      "granularity": "attempt",
+      "source_id": "synthetic-server",
+      "plandex_version": "2.2.1+usage-export.1",
+      "attempt_id": "6e2c94cd366dde0a8341b4b9ecf5860f",
+      "provider": "openrouter",
+      "model": "gpt-4.1-mini",
+      "ts": "2026-10-12T20:11:48.663921593Z",
+      "usage_basis": "unavailable",
+      "token_semantics": "inclusive_input_output",
+      "usage": null,
+      "native_cost": null,
+      "project_id": "project-b",
+      "plan_id": "plan-b",
+      "step_id": "step-b"
+    },
+    {
+      "schema": "plandex-usage/1",
+      "kind": "attempt",
+      "granularity": "attempt",
+      "source_id": "synthetic-server",
+      "plandex_version": "2.2.1+usage-export.1",
+      "attempt_id": "6e2c94cd366dde0a8341b4b9ecf5860f",
+      "native_request_id": "native-response",
+      "provider": "openrouter",
+      "model": "gpt-4.1-mini",
+      "ts": "2026-10-12T20:11:48.663921593Z",
+      "finished_at": "2026-10-12T20:11:48.664036907Z",
+      "status": "completed",
+      "usage_basis": "provider_reported",
+      "token_semantics": "inclusive_input_output",
+      "usage": {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "cache_read_tokens": 200,
+        "cache_write_tokens": 50,
+        "reasoning_tokens": 30
+      },
+      "raw_usage": {
+        "cache_write_tokens": 50,
+        "cached_tokens": 200,
+        "completion_tokens": 100,
+        "prompt_tokens": 1000,
+        "reasoning_tokens": 30,
+        "total_tokens": 1100
+      },
+      "native_cost": {
+        "amount": "0.00123",
+        "currency": "USD",
+        "provenance": "provider_response"
+      },
+      "project_id": "project-b",
+      "plan_id": "plan-b",
+      "step_id": "step-b"
+    }
+  ]
+}

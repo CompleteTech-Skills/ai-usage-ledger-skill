@@ -1,0 +1,8 @@
+{
+  "upstream_repository": "plandex-ai/plandex",
+  "upstream_revision": "e2d772072efadbe41d2946d97d79be55532dbab5",
+  "export_version": "e2d772072efadbe41d2946d97d79be55532dbab5+usage-export.2",
+  "patch_sha256": "bdfb89e229d8a93e5a61e7b8c572ad93d2547985df2329bd23f46d6d69446c2a",
+  "go_version": "1.26.3",
+  "scope": "opt-in POSIX self-hosted producer; gateway usage excluded from ledger totals"
+}

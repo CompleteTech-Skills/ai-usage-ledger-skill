@@ -22,3 +22,17 @@ shared snapshot pricing and HTML report generation, requiring zero additions on
 an unchanged scan and only new native records after growth. See
 [fixture notes](tests/README.goose.md). These checks do not certify live Goose
 execution, historical release compatibility or provider billing.
+
+## Experimental Plandex export collector
+
+The Quality workflow additionally runs:
+
+```bash
+python -m unittest discover -s tests -p 'test_plandex*.py' -v
+```
+
+`test_plandex.py` covers scoped local discovery, nullable token evidence, retries and fallbacks, growing plans, starts without terminal records, partial JSONL, duplicate exports, aggregate exclusion, schema rejection, immutable-identity conflicts, checkpoint replay, source read-only behavior, and privacy/path boundaries. `test_plandex_integration.py` requires a full checkout and exercises the real SQLite/JSON/CSV stores, repeated ingestion, price separation, unpriced models and existing scoped HTML reports. Its rates and provider responses are synthetic, not current pricing claims.
+
+`tests/plandex_sources/usage-v1.json` is a legacy synthetic expected-format fixture. It is deliberately outside `tests/fixtures`, which the existing fixture workflow regenerates and removes. No test connects to a Plandex database, personal account or live model. PostgreSQL role enforcement is not tested because this collector has no PostgreSQL path. The collector-owned SQLite checkpoint is not a Plandex source database.
+
+The separate [native producer workflow](.github/workflows/plandex-native.yml) applies the [version-bound companion patch](integrations/plandex/README.md), compiles the complete pinned server, runs Go transport/race tests and passes freshly generated exports through SQLite/JSON/CSV and scoped reports. Gateway usage must remain coverage-only. Stock Plandex, hosted-service support, real provider billing and production deployment remain outside the validated contract. Independent review and the existing merge gates still apply. See [the integration guide](references/plandex-self-hosted.md).

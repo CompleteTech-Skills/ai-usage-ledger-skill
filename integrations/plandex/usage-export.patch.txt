@@ -1,0 +1,936 @@
+diff --git a/app/server/model/client.go b/app/server/model/client.go
+index 08f87a5d..5a217a5e 100644
+--- a/app/server/model/client.go
++++ b/app/server/model/client.go
+@@ -14,0 +15 @@ import (
++	"plandex-server/usageexport"
+@@ -361 +362 @@ func createChatCompletionStreamExtended(
+-	resp, err := httpClient.Do(req) //nolint:bodyclose // body is closed in stream.Close()
++	resp, err := usageexport.Do(ctx, httpClient, req, string(baseModelConfig.Provider), string(extendedReq.Model)) //nolint:bodyclose // body is closed in stream.Close()
+diff --git a/app/server/model/client_stream.go b/app/server/model/client_stream.go
+index 6d4134eb..5441d1f0 100644
+--- a/app/server/model/client_stream.go
++++ b/app/server/model/client_stream.go
+@@ -110 +109,0 @@ func processChatCompletionStream(
+-	defer stream.Close()
+@@ -111,0 +111 @@ func processChatCompletionStream(
++	defer stream.Close()
+diff --git a/app/server/model/model_request.go b/app/server/model/model_request.go
+index c7b398d9..066d3eb7 100644
+--- a/app/server/model/model_request.go
++++ b/app/server/model/model_request.go
+@@ -10,0 +11 @@ import (
++	"plandex-server/usageexport"
+@@ -71,0 +73,3 @@ func ModelRequest(
++	if plan != nil {
++		ctx = usageexport.WithScope(ctx, usageexport.Scope{Project: plan.ProjectId, Plan: plan.Id, Session: sessionId, Execution: modelStreamId, Step: convoMessageId, Build: buildId})
++	}
+diff --git a/app/server/model/plan/tell_exec.go b/app/server/model/plan/tell_exec.go
+index 99f41b43..17ad6bf9 100644
+--- a/app/server/model/plan/tell_exec.go
++++ b/app/server/model/plan/tell_exec.go
+@@ -14,0 +15 @@ import (
++	"plandex-server/usageexport"
+@@ -568 +569,2 @@ func (state *activeTellStreamState) doTellRequest() {
+-	stream, err := model.CreateChatCompletionStream(clients, authVars, modelConfig, state.settings, state.orgUserConfig, state.currentOrgId, state.currentUserId, active.ModelStreamCtx, modelReq)
++	usageCtx := usageexport.WithScope(active.ModelStreamCtx, usageexport.Scope{Project: state.plan.ProjectId, Plan: state.plan.Id, Session: state.req.SessionId, Execution: state.modelStreamId, Step: state.replyId})
++	stream, err := model.CreateChatCompletionStream(clients, authVars, modelConfig, state.settings, state.orgUserConfig, state.currentOrgId, state.currentUserId, usageCtx, modelReq)
+diff --git a/app/server/model/usage_export_test.go b/app/server/model/usage_export_test.go
+new file mode 100644
+index 00000000..a1cb96db
+--- /dev/null
++++ b/app/server/model/usage_export_test.go
+@@ -0,0 +1,178 @@
++package model
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"plandex-server/types"
++	"plandex-server/usageexport"
++	shared "plandex-shared"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++)
++
++type ledgerTransport func(*http.Request) (*http.Response, error)
++
++func (f ledgerTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++// Exercises the actual server send/receive path with deterministic transports.
++// No provider request, database, personal configuration or SDK estimate is used.
++func TestLedgerUsageTransport(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("POSIX private exporter")
++	}
++	dir := t.TempDir()
++	_ = os.Chmod(dir, 0700)
++	config := filepath.Join(dir, "config.json")
++	data, _ := json.Marshal(usageexport.Config{Source: "synthetic-server", Directory: dir, Projects: []string{"project-a", "project-b"}, Approved: true})
++	if err := os.WriteFile(config, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	exporter, err := usageexport.Open(config)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer exporter.Close()
++	oldClient := httpClient
++	defer func() { httpClient = oldClient }()
++	settings := &shared.PlanSettings{Configured: true}
++	for index, p := range []struct {
++		provider             shared.ModelProvider
++		host, model, project string
++	}{
++		{shared.ModelProviderOpenAI, "https://api.openai.com/v1", "gpt-4.1", "project-a"},
++		{shared.ModelProviderOpenRouter, "https://openrouter.ai/api/v1", "gpt-4.1-mini", "project-b"},
++		{shared.ModelProviderOpenAI, "https://api.openai.com/v1", "gpt-4.1", "project-a"},
++		{shared.ModelProviderAnthropic, "http://localhost:4000/v1", "claude-fixture", "project-a"},
++	} {
++		body := `data: {"id":"native-response","model":"` + p.model + `","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":100,"total_tokens":1100,"prompt_tokens_details":{"cached_tokens":200,"cache_creation_tokens":50},"completion_tokens_details":{"reasoning_tokens":30},"cost":0.00123}}` + "\n\ndata: [DONE]\n\n"
++		if p.provider == shared.ModelProviderOpenRouter {
++			body = strings.ReplaceAll(body, "cache_creation_tokens", "cache_write_tokens")
++		}
++		httpClient = &http.Client{Transport: ledgerTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
++		})}
++		base := &shared.BaseModelConfig{BaseModelProviderConfig: shared.BaseModelProviderConfig{ModelProviderConfigSchema: shared.ModelProviderConfigSchema{Provider: p.provider, BaseUrl: p.host, SkipAuth: true}, ModelName: shared.ModelName(p.model)}}
++		cfg := &shared.ModelRoleConfig{ModelId: "ledger-fixture", BaseModelConfig: base}
++		settings.UsesCustomProviderByModelId = map[shared.ModelId][]shared.BaseModelUsesProvider{"ledger-fixture": {{Provider: p.provider, ModelName: shared.ModelName(p.model)}}}
++		ctx := usageexport.WithScope(usageexport.WithExporter(context.Background(), exporter), usageexport.Scope{Project: p.project, Plan: "plan-" + p.project, Session: "session-a", Step: "step-a"})
++		stream, err := createChatCompletionStreamExtended(cfg, ClientInfo{}, map[string]string{"OPENAI_API_KEY": "synthetic-key", "OPENROUTER_API_KEY": "synthetic-key", "ANTHROPIC_API_KEY": "synthetic-key"}, settings, nil, ctx, types.ExtendedChatCompletionRequest{Stream: true})
++		if err != nil {
++			t.Fatal(err)
++		}
++		var gotUsage bool
++		for {
++			r, err := stream.Recv()
++			if err == io.EOF {
++				break
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			gotUsage = gotUsage || r.Usage != nil
++		}
++		if !gotUsage {
++			t.Fatal("native stream lost usage")
++		}
++		if err := stream.Close(); err != nil {
++			t.Fatal(err)
++		}
++		if out := os.Getenv("PLANDEX_TEST_EXPORT_DIR"); out != "" && index >= 1 {
++			if err := os.MkdirAll(out, 0700); err != nil {
++				t.Fatal(err)
++			}
++			paths, _ := filepath.Glob(filepath.Join(dir, "journal-*.jsonl"))
++			raw, err := os.ReadFile(paths[0])
++			if err != nil {
++				t.Fatal(err)
++			}
++			name := []string{"", "native-export.jsonl", "native-grown.jsonl", "native-gateway.jsonl"}[index]
++			if err := os.WriteFile(filepath.Join(out, name), raw, 0600); err != nil {
++				t.Fatal(err)
++			}
++		}
++	}
++	paths, _ := filepath.Glob(filepath.Join(dir, "journal-*.jsonl"))
++	if len(paths) != 1 {
++		t.Fatal(paths)
++	}
++	raw, err := os.ReadFile(paths[0])
++	if err != nil {
++		t.Fatal(err)
++	}
++	var rows []map[string]any
++	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
++		var row map[string]any
++		if json.Unmarshal([]byte(line), &row) != nil {
++			t.Fatal("bad JSON")
++		}
++		rows = append(rows, row)
++	}
++	if len(rows) != 8 {
++		t.Fatal("expected four starts and four terminal records")
++	}
++	for _, i := range []int{1, 3, 5} {
++		if rows[i]["usage_basis"] != "provider_reported" || rows[i]["status"] != "completed" {
++			t.Fatal(rows[i])
++		}
++	}
++	if rows[7]["usage_basis"] != "gateway_reported_unverified" {
++		t.Fatal("gateway evidence incorrectly attested")
++	}
++}
++
++func TestLedgerInternalSuccessStatus(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.Chmod(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	config := filepath.Join(dir, "config.json")
++	data, _ := json.Marshal(usageexport.Config{Source: "review-source", Directory: dir, Projects: []string{"project-a"}, Approved: true})
++	if err := os.WriteFile(config, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	exporter, err := usageexport.Open(config)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer exporter.Close()
++	oldClient := httpClient
++	defer func() { httpClient = oldClient }()
++	body := "data: {\"id\":\"review-response\",\"model\":\"gpt-4.1\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1,\"total_tokens\":11}}\n\ndata: [DONE]\n\n"
++	httpClient = &http.Client{Transport: ledgerTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
++	})}
++	base := &shared.BaseModelConfig{BaseModelProviderConfig: shared.BaseModelProviderConfig{ModelProviderConfigSchema: shared.ModelProviderConfigSchema{Provider: shared.ModelProviderOpenAI, BaseUrl: "https://api.openai.com/v1", SkipAuth: true}, ModelName: "gpt-4.1"}}
++	cfg := &shared.ModelRoleConfig{ModelId: "review-fixture", BaseModelConfig: base}
++	settings := &shared.PlanSettings{Configured: true}
++	settings.UsesCustomProviderByModelId = map[shared.ModelId][]shared.BaseModelUsesProvider{"review-fixture": {{Provider: shared.ModelProviderOpenAI, ModelName: "gpt-4.1"}}}
++	ctx := usageexport.WithScope(usageexport.WithExporter(context.Background(), exporter), usageexport.Scope{Project: "project-a", Plan: "plan-a"})
++	result, err := processChatCompletionStream(cfg, ClientInfo{}, map[string]string{"OPENAI_API_KEY": "synthetic-key"}, settings, nil, ctx, types.ExtendedChatCompletionRequest{Stream: true}, nil, time.Now())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if result == nil {
++		t.Fatal("nil model result")
++	}
++	paths, _ := filepath.Glob(filepath.Join(dir, "journal-*.jsonl"))
++	raw, err := os.ReadFile(paths[0])
++	if err != nil {
++		t.Fatal(err)
++	}
++	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
++	if len(lines) != 2 {
++		t.Fatalf("expected terminal record; got %s", raw)
++	}
++	var row map[string]any
++	if err := json.Unmarshal([]byte(lines[1]), &row); err != nil {
++		t.Fatal(err)
++	}
++	if row["status"] != "completed" {
++		t.Fatalf("normal successful model request was exported as %v", row["status"])
++	}
++}
+diff --git a/app/server/usageexport/config_linux_test.go b/app/server/usageexport/config_linux_test.go
+new file mode 100644
+index 00000000..14907364
+--- /dev/null
++++ b/app/server/usageexport/config_linux_test.go
+@@ -0,0 +1,33 @@
++package usageexport
++
++import (
++	"os"
++	"path/filepath"
++	"syscall"
++	"testing"
++)
++
++func TestConfigRejectsSpecialFiles(t *testing.T) {
++	dir := t.TempDir()
++	fifo := filepath.Join(dir, "config-fifo")
++	if err := syscall.Mkfifo(fifo, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := Open(fifo); err == nil {
++		t.Fatal("accepted FIFO config")
++	}
++	regular := filepath.Join(dir, "config.json")
++	if err := os.WriteFile(regular, []byte("{}"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	link := filepath.Join(dir, "config-link")
++	if err := os.Symlink(regular, link); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := Open(link); err == nil {
++		t.Fatal("accepted symlink config")
++	}
++	if _, err := Open(dir); err == nil {
++		t.Fatal("accepted directory config")
++	}
++}
+diff --git a/app/server/usageexport/config_unix.go b/app/server/usageexport/config_unix.go
+new file mode 100644
+index 00000000..4f2d577f
+--- /dev/null
++++ b/app/server/usageexport/config_unix.go
+@@ -0,0 +1,28 @@
++//go:build !windows
++
++package usageexport
++
++import (
++	"errors"
++	"os"
++	"syscall"
++)
++
++// Nonblocking/no-follow open prevents a replaced config from becoming a FIFO
++// wait or symlink read between path validation and opening.
++func openConfig(path string) (*os.File, error) {
++	before, err := os.Lstat(path)
++	if err != nil {
++		return nil, err
++	}
++	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
++	if err != nil {
++		return nil, err
++	}
++	after, err := f.Stat()
++	if err != nil || !after.Mode().IsRegular() || after.Mode().Perm()&0077 != 0 || !os.SameFile(before, after) {
++		_ = f.Close()
++		return nil, errors.New("config changed or is not a private regular file")
++	}
++	return f, nil
++}
+diff --git a/app/server/usageexport/config_windows.go b/app/server/usageexport/config_windows.go
+new file mode 100644
+index 00000000..bcd3f37c
+--- /dev/null
++++ b/app/server/usageexport/config_windows.go
+@@ -0,0 +1,10 @@
++package usageexport
++
++import (
++	"errors"
++	"os"
++)
++
++func openConfig(string) (*os.File, error) {
++	return nil, errors.New("producer requires POSIX private file modes")
++}
+diff --git a/app/server/usageexport/export.go b/app/server/usageexport/export.go
+new file mode 100644
+index 00000000..c47353eb
+--- /dev/null
++++ b/app/server/usageexport/export.go
+@@ -0,0 +1,428 @@
++// Package usageexport records opt-in, metadata-only HTTP attempt evidence.
++// It never reads request bodies, credentials, or application databases.
++package usageexport
++
++import (
++	"bytes"
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"io"
++	"log"
++	"math"
++	"net/http"
++	"net/url"
++	"os"
++	"path/filepath"
++	"regexp"
++	"sync"
++	"time"
++)
++
++const Version = "e2d772072efadbe41d2946d97d79be55532dbab5+usage-export.2"
++const maxCount = int64(1<<53 - 1)
++
++var identifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$`)
++var modelName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_./:+-]{0,255}$`)
++
++type Scope struct {
++	Project   string `json:"project_id"`
++	Plan      string `json:"plan_id"`
++	Session   string `json:"session_id,omitempty"`
++	Execution string `json:"execution_id,omitempty"`
++	Step      string `json:"step_id,omitempty"`
++	Build     string `json:"build_id,omitempty"`
++}
++type scopeKey struct{}
++type exporterKey struct{}
++
++func WithScope(ctx context.Context, scope Scope) context.Context {
++	return context.WithValue(ctx, scopeKey{}, scope)
++}
++
++// WithExporter supports explicit embedding and deterministic transport tests.
++func WithExporter(ctx context.Context, e *Exporter) context.Context {
++	return context.WithValue(ctx, exporterKey{}, e)
++}
++
++type Config struct {
++	Source    string   `json:"source_id"`
++	Directory string   `json:"directory"`
++	Projects  []string `json:"project_ids"`
++	Approved  bool     `json:"approved_project_scope"`
++}
++type Exporter struct {
++	mu       sync.Mutex
++	file     *os.File
++	source   string
++	projects map[string]bool
++}
++
++func privatePath(path string, dir bool) error {
++	if !filepath.IsAbs(path) {
++		return errors.New("export path must be absolute")
++	}
++	for p := filepath.Clean(path); ; p = filepath.Dir(p) {
++		st, err := os.Lstat(p)
++		if err != nil || st.Mode()&os.ModeSymlink != 0 {
++			return errors.New("unsafe export path")
++		}
++		if p == filepath.Clean(path) && (st.IsDir() != dir || !dir && !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0) {
++			return errors.New("export path must be private")
++		}
++		if filepath.Dir(p) == p {
++			break
++		}
++	}
++	return nil
++}
++
++func Open(configPath string) (*Exporter, error) {
++	if err := privatePath(configPath, false); err != nil {
++		return nil, err
++	}
++	f, err := openConfig(configPath)
++	if err != nil {
++		return nil, errors.New("cannot open export config")
++	}
++	defer f.Close()
++	dec := json.NewDecoder(io.LimitReader(f, 65537))
++	dec.DisallowUnknownFields()
++	var cfg Config
++	if dec.Decode(&cfg) != nil || !cfg.Approved || !identifier.MatchString(cfg.Source) || len(cfg.Projects) == 0 {
++		return nil, errors.New("invalid export config")
++	}
++	var extra any
++	if dec.Decode(&extra) != io.EOF {
++		return nil, errors.New("invalid export config trailing data")
++	}
++	if err := privatePath(cfg.Directory, true); err != nil {
++		return nil, err
++	}
++	projects := map[string]bool{}
++	for _, p := range cfg.Projects {
++		if !identifier.MatchString(p) || projects[p] {
++			return nil, errors.New("invalid project scope")
++		}
++		projects[p] = true
++	}
++	id, err := randomID()
++	if err != nil {
++		return nil, err
++	}
++	journal, err := os.OpenFile(filepath.Join(cfg.Directory, "journal-"+id+".jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if err != nil {
++		return nil, errors.New("cannot create private export journal")
++	}
++	return &Exporter{file: journal, source: cfg.Source, projects: projects}, nil
++}
++func randomID() (string, error) {
++	var b [16]byte
++	_, err := rand.Read(b[:])
++	return hex.EncodeToString(b[:]), err
++}
++func (e *Exporter) Close() error { e.mu.Lock(); defer e.mu.Unlock(); return e.file.Close() }
++func (e *Exporter) write(row map[string]any) error {
++	b, err := json.Marshal(row)
++	if err != nil {
++		return err
++	}
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	if _, err = e.file.Write(append(b, '\n')); err != nil {
++		return err
++	}
++	return e.file.Sync()
++}
++
++var defaultOnce sync.Once
++var defaultExporter *Exporter
++
++func selected(ctx context.Context) *Exporter {
++	if e, ok := ctx.Value(exporterKey{}).(*Exporter); ok {
++		return e
++	}
++	defaultOnce.Do(func() {
++		if p := os.Getenv("PLANDEX_USAGE_EXPORT_CONFIG"); p != "" {
++			var err error
++			defaultExporter, err = Open(p)
++			if err != nil {
++				log.Print("usage export unavailable: invalid or inaccessible configuration")
++			}
++		}
++	})
++	return defaultExporter
++}
++
++// Do wraps precisely one http.Client.Do invocation after provider selection.
++// Export failures never retry, cancel, or replace the model request.
++func Do(ctx context.Context, client *http.Client, req *http.Request, provider, model string) (*http.Response, error) {
++	e := selected(ctx)
++	scope, _ := ctx.Value(scopeKey{}).(Scope)
++	if e == nil || !e.projects[scope.Project] || !identifier.MatchString(scope.Plan) || !identifier.MatchString(provider) || !modelName.MatchString(model) {
++		return client.Do(req)
++	}
++	for _, s := range []string{scope.Session, scope.Execution, scope.Step, scope.Build} {
++		if s != "" && !identifier.MatchString(s) {
++			return client.Do(req)
++		}
++	}
++	id, err := randomID()
++	if err != nil {
++		return client.Do(req)
++	}
++	scopeBytes, _ := json.Marshal(scope)
++	row := map[string]any{}
++	_ = json.Unmarshal(scopeBytes, &row)
++	row["schema"], row["kind"], row["granularity"] = "plandex-usage/1", "attempt_start", "attempt"
++	row["source_id"], row["plandex_version"], row["attempt_id"] = e.source, Version, id
++	row["provider"], row["model"], row["ts"] = provider, model, time.Now().UTC().Format(time.RFC3339Nano)
++	row["usage_basis"], row["token_semantics"], row["usage"], row["native_cost"] = "unavailable", "inclusive_input_output", nil, nil
++	if e.write(row) != nil {
++		log.Print("usage export unavailable: journal write failed")
++		return client.Do(req)
++	}
++	body := &observedBody{ctx: ctx, exporter: e, row: row}
++	resp, err := client.Do(req)
++	if err != nil {
++		body.finish("error")
++		return resp, err
++	}
++	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
++		body.finish("error")
++		return resp, nil
++	}
++	endpoint := req.URL
++	if resp.Request != nil {
++		endpoint = resp.Request.URL
++	}
++	body.direct = directEndpoint(provider, endpoint)
++	body.body = resp.Body
++	resp.Body = body
++	return resp, nil
++}
++func directEndpoint(provider string, endpoint *url.URL) bool {
++	return endpoint != nil && endpoint.Scheme == "https" && ((provider == "openai" && endpoint.Host == "api.openai.com") || (provider == "openrouter" && endpoint.Host == "openrouter.ai"))
++}
++
++type observedBody struct {
++	ctx                                                 context.Context
++	exporter                                            *Exporter
++	body                                                io.ReadCloser
++	mu                                                  sync.Mutex
++	row                                                 map[string]any
++	line                                                []byte
++	dropping, finished, direct, done, stopped, badUsage bool
++}
++
++func (b *observedBody) Read(p []byte) (int, error) {
++	n, err := b.body.Read(p)
++	b.mu.Lock()
++	for _, c := range p[:n] {
++		if c == '\n' {
++			if !b.dropping {
++				b.observe(bytes.TrimSpace(b.line))
++			}
++			b.line = b.line[:0]
++			b.dropping = false
++		} else if len(b.line) >= 65536 {
++			b.dropping = true
++			b.line = b.line[:0]
++			b.badUsage = true
++			b.row["usage"], b.row["usage_basis"] = nil, "unavailable"
++		} else if !b.dropping {
++			b.line = append(b.line, c)
++		}
++	}
++	b.mu.Unlock()
++	if err != nil {
++		status := "error"
++		if err == io.EOF {
++			status = "interrupted"
++		}
++		b.finish(status)
++	}
++	return n, err
++}
++func (b *observedBody) Close() error { err := b.body.Close(); b.finish("interrupted"); return err }
++func (b *observedBody) observe(line []byte) {
++	if b.finished || b.done || !bytes.HasPrefix(line, []byte("data:")) {
++		return
++	}
++	data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
++	if bytes.Equal(data, []byte("[DONE]")) {
++		b.done = true
++		return
++	}
++	var chunk struct {
++		ID      string          `json:"id"`
++		Model   string          `json:"model"`
++		Usage   json.RawMessage `json:"usage"`
++		Error   json.RawMessage `json:"error"`
++		Choices []struct {
++			Finish string `json:"finish_reason"`
++		} `json:"choices"`
++	}
++	if json.Unmarshal(data, &chunk) != nil {
++		return
++	}
++	if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
++		b.row["stream_error"] = true
++	}
++	for _, choice := range chunk.Choices {
++		if choice.Finish != "" {
++			b.stopped = true
++			if choice.Finish == "error" {
++				b.row["stream_error"] = true
++			}
++		}
++	}
++	if identifier.MatchString(chunk.ID) {
++		b.row["native_request_id"] = chunk.ID
++	}
++	if modelName.MatchString(chunk.Model) {
++		b.row["model"] = chunk.Model
++	}
++	if len(chunk.Usage) == 0 || string(chunk.Usage) == "null" {
++		return
++	}
++	usage, raw, ok := parseUsage(chunk.Usage)
++	if !ok {
++		b.badUsage = true
++		b.row["usage"], b.row["usage_basis"] = nil, "unavailable"
++		return
++	}
++	if b.badUsage {
++		return
++	}
++	b.row["usage"], b.row["raw_usage"] = usage, raw
++	var costFields map[string]json.RawMessage
++	_ = json.Unmarshal(chunk.Usage, &costFields)
++	if cost, ok := costFields["cost"]; ok {
++		var amount float64
++		if json.Unmarshal(cost, &amount) == nil && string(cost) != "null" && !math.IsInf(amount, 0) && amount >= 0 && amount <= 1e12 {
++			b.row["native_cost"] = map[string]string{"amount": string(cost), "currency": "USD", "provenance": "provider_response"}
++		}
++	}
++	b.row["usage_basis"] = "gateway_reported_unverified"
++	if b.direct {
++		b.row["usage_basis"] = "provider_reported"
++	}
++}
++func (b *observedBody) finish(status string) {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	if b.finished {
++		return
++	}
++	b.finished = true
++	if b.ctx.Err() != nil {
++		status = "cancelled"
++	} else if b.row["stream_error"] == true {
++		status = "error"
++	} else if b.done || b.stopped {
++		status = "completed"
++	}
++	delete(b.row, "stream_error")
++	b.row["kind"], b.row["status"], b.row["finished_at"] = "attempt", status, time.Now().UTC().Format(time.RFC3339Nano)
++	if b.exporter.write(b.row) != nil {
++		log.Print("usage export incomplete: journal write failed")
++	}
++	// Discard transient response-line storage on completion.
++	b.line = nil
++}
++
++func parseUsage(data []byte) (map[string]any, map[string]any, bool) {
++	var raw map[string]json.RawMessage
++	if json.Unmarshal(data, &raw) != nil || raw == nil {
++		return nil, nil, false
++	}
++	read := func(m map[string]json.RawMessage, key string) (*int64, bool) {
++		v, ok := m[key]
++		if !ok || string(v) == "null" {
++			return nil, true
++		}
++		var n int64
++		if json.Unmarshal(v, &n) != nil || n < 0 || n > maxCount {
++			return nil, false
++		}
++		return &n, true
++	}
++	fields := map[string]any{}
++	evidence := map[string]any{}
++	for target, name := range map[string]string{"input_tokens": "prompt_tokens", "output_tokens": "completion_tokens"} {
++		n, ok := read(raw, name)
++		if !ok {
++			return nil, nil, false
++		}
++		fields[target] = n
++		evidence[name] = n
++	}
++	for details, names := range map[string]map[string]string{"prompt_tokens_details": {"cache_read_tokens": "cached_tokens", "cache_write_tokens": "cache_creation_tokens"}, "completion_tokens_details": {"reasoning_tokens": "reasoning_tokens"}} {
++		var nested map[string]json.RawMessage
++		if v, ok := raw[details]; ok && json.Unmarshal(v, &nested) != nil {
++			return nil, nil, false
++		}
++		for target, name := range names {
++			n, ok := read(nested, name)
++			if !ok {
++				return nil, nil, false
++			}
++			fields[target] = n
++			evidence[map[string]string{"cache_read_tokens": "cached_tokens", "cache_write_tokens": "cache_write_tokens", "reasoning_tokens": "reasoning_tokens"}[target]] = n
++		}
++		if details == "prompt_tokens_details" {
++			// OpenRouter's documented cache-write field; other adapters may use
++			// cache_creation_tokens. Treat them as aliases, never extra tokens.
++			if _, exists := nested["cache_write_tokens"]; exists {
++				n, ok := read(nested, "cache_write_tokens")
++				old := fields["cache_write_tokens"].(*int64)
++				if !ok || old != nil && n != nil && *old != *n {
++					return nil, nil, false
++				}
++				if n != nil {
++					fields["cache_write_tokens"] = n
++					evidence["cache_write_tokens"] = n
++				}
++			}
++		}
++	}
++	for target, alias := range map[string]string{"cache_read_tokens": "cache_read_input_tokens", "cache_write_tokens": "cache_creation_input_tokens"} {
++		if _, exists := raw[alias]; exists {
++			n, ok := read(raw, alias)
++			if !ok {
++				return nil, nil, false
++			}
++			old := fields[target].(*int64)
++			if old != nil && n != nil && *old != *n {
++				return nil, nil, false
++			}
++			if n != nil {
++				fields[target] = n
++			}
++			evidence[alias] = n
++		}
++	}
++	in, out := fields["input_tokens"].(*int64), fields["output_tokens"].(*int64)
++	cr, cw, r := fields["cache_read_tokens"].(*int64), fields["cache_write_tokens"].(*int64), fields["reasoning_tokens"].(*int64)
++	value := func(n *int64) int64 {
++		if n == nil {
++			return 0
++		}
++		return *n
++	}
++	if in != nil && value(cr)+value(cw) > *in || out != nil && value(r) > *out {
++		return nil, nil, false
++	}
++	if in != nil && out != nil && *in+*out > maxCount {
++		return nil, nil, false
++	}
++	if total, ok := read(raw, "total_tokens"); !ok || total != nil && in != nil && out != nil && *total != *in+*out {
++		return nil, nil, false
++	} else {
++		evidence["total_tokens"] = total
++	}
++	return fields, evidence, true
++}
+diff --git a/app/server/usageexport/export_test.go b/app/server/usageexport/export_test.go
+new file mode 100644
+index 00000000..5a0337dd
+--- /dev/null
++++ b/app/server/usageexport/export_test.go
+@@ -0,0 +1,186 @@
++package usageexport
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"testing"
++)
++
++type transport func(*http.Request) (*http.Response, error)
++
++func (f transport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++func testExporter(t *testing.T) (*Exporter, string) {
++	t.Helper()
++	if runtime.GOOS == "windows" {
++		t.Skip("production exporter requires POSIX private modes")
++	}
++	dir := t.TempDir()
++	if err := os.Chmod(dir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	config := filepath.Join(dir, "config.json")
++	b, _ := json.Marshal(Config{Source: "synthetic-server", Directory: dir, Projects: []string{"project-a"}, Approved: true})
++	if err := os.WriteFile(config, b, 0600); err != nil {
++		t.Fatal(err)
++	}
++	e, err := Open(config)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = e.Close() })
++	return e, dir
++}
++func rows(t *testing.T, dir string) []map[string]any {
++	t.Helper()
++	files, _ := filepath.Glob(filepath.Join(dir, "journal-*.jsonl"))
++	var result []map[string]any
++	for _, p := range files {
++		b, err := os.ReadFile(p)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
++			if line == "" {
++				continue
++			}
++			var r map[string]any
++			if json.Unmarshal([]byte(line), &r) != nil {
++				t.Fatal("invalid journal")
++			}
++			result = append(result, r)
++		}
++	}
++	return result
++}
++func response(body string) *http.Client {
++	return &http.Client{Transport: transport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
++	})}
++}
++
++const validUsage = `{"prompt_tokens":1000,"completion_tokens":100,"total_tokens":1100,"prompt_tokens_details":{"cached_tokens":200,"cache_creation_tokens":50},"completion_tokens_details":{"reasoning_tokens":30}}`
++
++func TestUsageValidation(t *testing.T) {
++	for _, input := range []string{`null`, `[]`, `{"prompt_tokens":true}`, `{"prompt_tokens":1.1}`, `{"prompt_tokens":-1}`, `{"prompt_tokens":9007199254740992}`, `{"prompt_tokens":4,"completion_tokens":2,"total_tokens":9}`, `{"prompt_tokens":4,"prompt_tokens_details":{"cached_tokens":5}}`, `{"completion_tokens":2,"completion_tokens_details":{"reasoning_tokens":3}}`, `{"prompt_tokens_details":{"cached_tokens":1},"cache_read_input_tokens":2}`} {
++		if _, _, ok := parseUsage([]byte(input)); ok {
++			t.Errorf("accepted malformed usage %s", input)
++		}
++	}
++	u, _, ok := parseUsage([]byte(validUsage))
++	if !ok || *u["input_tokens"].(*int64) != 1000 {
++		t.Fatal("valid counters rejected")
++	}
++	u, _, ok = parseUsage([]byte(`{"prompt_tokens":0,"completion_tokens":0}`))
++	if !ok || u["cache_read_tokens"].(*int64) != nil {
++		t.Fatal("unknown must remain nil")
++	}
++}
++
++func TestOpenRouterCacheAliases(t *testing.T) {
++	for _, input := range []string{
++		`{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_write_tokens":50}}`,
++		`{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_creation_tokens":50,"cache_write_tokens":50}}`,
++	} {
++		usage, _, ok := parseUsage([]byte(input))
++		if !ok || *usage["cache_write_tokens"].(*int64) != 50 {
++			t.Fatal("OpenRouter cache writes lost")
++		}
++	}
++	for _, input := range []string{
++		`{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cache_creation_tokens":50,"cache_write_tokens":51}}`,
++		`{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cache_write_tokens":true}}`,
++		`{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cache_write_tokens":50},"cache_creation_input_tokens":51}`,
++	} {
++		if _, _, ok := parseUsage([]byte(input)); ok {
++			t.Fatal("accepted conflicting or malformed cache writes")
++		}
++	}
++}
++func TestAttemptLifecycle(t *testing.T) {
++	for _, tc := range []struct{ name, provider, endpoint, body, status, basis string }{
++		{"direct", "openai", "https://api.openai.com/v1/chat/completions", "data: {\"id\":\"request-1\",\"model\":\"gpt-4.1\",\"usage\":" + validUsage + "}\n\ndata: [DONE]\n\n", "completed", "provider_reported"},
++		{"gateway", "anthropic", "http://localhost:4000/v1/chat/completions", "data: {\"usage\":" + validUsage + "}\n\ndata: [DONE]\n", "completed", "gateway_reported_unverified"},
++		{"custom-openai", "openai", "https://unverified.example/v1/chat/completions", "data: {\"usage\":" + validUsage + "}\n\ndata: [DONE]\n", "completed", "gateway_reported_unverified"},
++		{"missing", "openai", "https://api.openai.com/v1/chat/completions", "data: {\"choices\":[{\"delta\":{\"content\":\"PRIVATE RESPONSE\"}}]}\n\ndata: [DONE]\n", "completed", "unavailable"},
++		{"truncated", "openai", "https://api.openai.com/v1/chat/completions", "data: {\"usage\":" + validUsage + "}\n", "interrupted", "provider_reported"},
++		{"stream-error", "openai", "https://api.openai.com/v1/chat/completions", "data: {\"error\":\"PRIVATE ERROR\"}\n\ndata: [DONE]\n", "error", "unavailable"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			e, dir := testExporter(t)
++			ctx := WithScope(WithExporter(context.Background(), e), Scope{Project: "project-a", Plan: "plan-a"})
++			req, _ := http.NewRequestWithContext(ctx, "POST", tc.endpoint, strings.NewReader("PRIVATE REQUEST"))
++			req.Header.Set("Authorization", "PRIVATE TOKEN")
++			resp, err := Do(ctx, response(tc.body), req, tc.provider, "gpt-4.1")
++			if err != nil {
++				t.Fatal(err)
++			}
++			b, err := io.ReadAll(resp.Body)
++			if err != nil {
++				t.Fatal(err)
++			}
++			_ = resp.Body.Close()
++			_ = resp.Body.Close()
++			if string(b) != tc.body {
++				t.Fatal("response changed")
++			}
++			rs := rows(t, dir)
++			if len(rs) != 2 || rs[1]["status"] != tc.status || rs[1]["usage_basis"] != tc.basis {
++				t.Fatalf("bad lifecycle: %v", rs)
++			}
++			encoded, _ := json.Marshal(rs)
++			if strings.Contains(string(encoded), "PRIVATE") {
++				t.Fatal("private payload leaked")
++			}
++		})
++	}
++}
++func TestScopeErrorsAndRetries(t *testing.T) {
++	e, dir := testExporter(t)
++	scope := Scope{Project: "project-a", Plan: "plan-a"}
++	ctx := WithScope(WithExporter(context.Background(), e), scope)
++	for i := 0; i < 2; i++ {
++		req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", nil)
++		client := &http.Client{Transport: transport(func(*http.Request) (*http.Response, error) { return nil, errors.New("PRIVATE TRANSPORT") })}
++		if _, err := Do(ctx, client, req, "openai", "gpt-4.1"); err == nil {
++			t.Fatal("transport error hidden")
++		}
++	}
++	rs := rows(t, dir)
++	if len(rs) != 4 || rs[1]["attempt_id"] == rs[3]["attempt_id"] || rs[1]["status"] != "error" {
++		t.Fatal("retries lost")
++	}
++	ctx = WithScope(ctx, Scope{Project: "unauthorized", Plan: "plan-a"})
++	req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", nil)
++	resp, err := Do(ctx, response("data: [DONE]\n"), req, "openai", "gpt-4.1")
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.ReadAll(resp.Body)
++	_ = resp.Body.Close()
++	if len(rows(t, dir)) != 4 {
++		t.Fatal("out-of-scope capture")
++	}
++}
++func TestCancelledAndOversized(t *testing.T) {
++	e, dir := testExporter(t)
++	ctx, cancel := context.WithCancel(WithScope(WithExporter(context.Background(), e), Scope{Project: "project-a", Plan: "plan-a"}))
++	req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", nil)
++	resp, err := Do(ctx, response("data: "+strings.Repeat("x", 70000)+"\ndata: {\"usage\":"+validUsage+"}\n"), req, "openai", "gpt-4.1")
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = io.ReadAll(resp.Body)
++	cancel()
++	_ = resp.Body.Close()
++	rs := rows(t, dir)
++	if len(rs) != 2 || rs[1]["usage_basis"] != "unavailable" {
++		t.Fatal("oversized record did not invalidate usage")
++	}
++}
