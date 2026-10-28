@@ -25,7 +25,8 @@ MAX_BYTES = 128 * 1024 * 1024
 ROLES = {"system", "developer", "user", "assistant", "tool", "function"}
 CONTENT_FIELDS = ("tool_calls", "function_call", "toolCalls", "thoughts", "attachments",
                   "images", "local_images", "refusal", "audio", "annotations", "citations",
-                  "reasoning_content", "reasoning", "reasoning_details", "thinking")
+                  "reasoning_content", "reasoning", "reasoning_details", "thinking",
+                  "details", "nestedCalls", "isError", "durationMs", "stopReason", "errorMessage")
 CODEX_METADATA = {"session_meta", "turn_context"}
 CODEX_EVENTS = {"token_count", "task_started", "task_complete", "turn_aborted",
                 "item_started", "item_completed", "context_compacted", "thread_rolled_back"}
@@ -135,12 +136,16 @@ def message(row, role=None, content=None, kind="message"):
     if content is None and not any(key in row for key in CONTENT_FIELDS):
         return None
     result = {"role": role, "kind": kind, "content": content}
-    for key in ("id", "name", "call_id", "tool_call_id", "toolCallId", "toolName", "parentId", "parentUuid", "channel", "model"):
+    for key in ("id", "name", "call_id", "tool_call_id", "toolCallId", "toolName", "parentId", "parentUuid", "channel", "phase", "model"):
         if identifier(row.get(key)):
             result[key] = row[key]
     for key in CONTENT_FIELDS:
         if key in row:
             result[key] = row[key]
+    if identifier(row.get("type")):
+        result["native_type"] = row["type"]
+    if "timestamp" in row:
+        result["message_timestamp"] = row["timestamp"]
     return result
 
 
@@ -193,7 +198,7 @@ def parse_source(path, data, suffix, requested_tool, source_index):
         item["tool"] = tool
         item["source"] = source_index
         item["record"] = index
-        stamp = outer.get("timestamp", outer.get("ts", outer.get("created_at", item.get("timestamp"))))
+        stamp = outer.get("timestamp", outer.get("ts", outer.get("created_at", item.get("message_timestamp"))))
         if isinstance(stamp, (str, int, float)) and not isinstance(stamp, bool):
             item["timestamp"] = stamp
         (mirrors if mirror else found).append(item)

@@ -89,12 +89,17 @@ class ConversationExportTests(unittest.TestCase):
     def test_pi_and_messages_envelopes(self):
         pi = self.source([{"type": "session", "id": "pi-1"}, {"type": "model_change", "modelId": "fixture"},
                           {"type": "message", "id": "p1", "parentId": "parent", "message": {"role": "assistant", "content": "hello"}},
-                          {"type": "message", "id": "p2", "message": {"role": "toolResult", "toolCallId": "tc1", "toolName": "read", "content": [{"type": "text", "text": "tool result"}]}}], "pi.jsonl")
+                          {"type": "message", "id": "p2", "message": {"role": "toolResult", "toolCallId": "tc1", "toolName": "read", "content": [{"type": "text", "text": "tool result"}],
+                           "details": {"exitCode": 1}, "isError": True, "durationMs": 25, "timestamp": 123,
+                           "nestedCalls": [{"name": "nested", "result": "recorded"}]}}], "pi.jsonl")
         result = conversation.gather([pi])
         self.assertEqual(result["messages"][0]["session"], "pi-1")
         self.assertEqual(result["messages"][0]["parentId"], "parent")
         self.assertEqual(result["messages"][1]["role"], "tool")
         self.assertEqual(result["messages"][1]["toolCallId"], "tc1")
+        for key in ("details", "isError", "durationMs", "nestedCalls"):
+            self.assertEqual(result["messages"][1][key], json.loads(pi.read_text().splitlines()[-1])["message"][key])
+        self.assertEqual(result["messages"][1]["message_timestamp"], 123)
         generic = self.source({"sessionId": "generic-1", "messages": [
             {"role": "system", "content": "synthetic instructions"},
             {"type": "gemini", "content": [{"text": "response"}], "thoughts": [{"text": "stored thought"}]},
@@ -103,6 +108,13 @@ class ConversationExportTests(unittest.TestCase):
         messages = conversation.gather([generic])["messages"]
         self.assertEqual([row["role"] for row in messages], ["system", "assistant", "assistant", "tool"])
         self.assertEqual(messages[1]["thoughts"], [{"text": "stored thought"}])
+
+    def test_codex_builtin_tool_type_and_message_phase_are_retained(self):
+        rows = [{"type": "response_item", "payload": {"type": "web_search_call", "id": "w1", "action": {"query": "synthetic"}}},
+                {"type": "response_item", "payload": {"type": "message", "role": "assistant", "phase": "final_answer", "content": "answer"}}]
+        messages = conversation.gather([self.source(rows, "builtin.jsonl")])["messages"]
+        self.assertEqual(messages[0]["native_type"], "web_search_call")
+        self.assertEqual(messages[1]["phase"], "final_answer")
 
     def test_standard_reasoning_and_citation_content_is_preserved(self):
         messages = [{"role": "assistant", "content": "Answer", "reasoning_content": "Recorded summary",
