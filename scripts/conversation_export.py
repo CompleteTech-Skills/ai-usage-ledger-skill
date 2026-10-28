@@ -203,6 +203,26 @@ def parse_source(path, data, suffix, requested_tool, source_index):
             item["timestamp"] = stamp
         (mirrors if mirror else found).append(item)
 
+    def add_instructions(payload, outer, index, native_type):
+        """Keep recorded instruction text without copying runtime configuration."""
+        present = False
+        for field, role in (("base_instructions", "system"), ("instructions", "system"),
+                            ("developer_instructions", "developer"), ("user_instructions", "user")):
+            value = payload.get(field)
+            if value is None:
+                continue
+            present = True
+            if field == "base_instructions" and isinstance(value, dict):
+                value = value.get("text")
+            if not isinstance(value, str):
+                gaps.append({"source": source_index, "record": index,
+                             "code": "unsupported_instruction_content", "field": field})
+                continue
+            item = message({}, role, value, "recorded_instructions")
+            item.update(instruction_field=field, native_type=native_type)
+            add(item, outer, index)
+        return present
+
     for index, row in records:
         if tool in ("codex", "claude-code", "pi") and not isinstance(row, dict):
             gaps.append({"source": source_index, "record": index, "code": "unsupported_record"})
@@ -213,7 +233,10 @@ def parse_source(path, data, suffix, requested_tool, source_index):
             if typ in CODEX_METADATA:
                 if typ == "session_meta" and isinstance(payload, dict):
                     session = identifier(payload.get("id")) or session
-                ignored[str(typ)] += 1
+                if not isinstance(payload, dict):
+                    gaps.append({"source": source_index, "record": index, "code": "unsupported_record"})
+                elif not add_instructions(payload, row, index, typ):
+                    ignored[str(typ)] += 1
                 continue
             if not isinstance(payload, dict):
                 gaps.append({"source": source_index, "record": index, "code": "unsupported_record"})
@@ -285,11 +308,16 @@ def parse_source(path, data, suffix, requested_tool, source_index):
     # UI events may echo response items, but text/proximity/timestamps alone do
     # not prove identity. Collapse only a shared native message ID and preserve
     # the complete UI observation as provenance. Otherwise keep both records.
+    canonical = {}
+    for index, item in enumerate(found):
+        if item["kind"] == "message" and item.get("id"):
+            key = (item["id"], item["role"], item["session"], text_content(item["content"]))
+            canonical.setdefault(key, index)
     for mirror in mirrors:
-        match = next((n for n, item in enumerate(found) if mirror.get("id")
-                      and item.get("id") == mirror["id"] and item["role"] == mirror["role"]
-                      and item["session"] == mirror["session"] and item["kind"] == "message"
-                      and text_content(item["content"]) == text_content(mirror["content"])), None)
+        match = None
+        if mirror.get("id"):
+            key = (mirror["id"], mirror["role"], mirror["session"], text_content(mirror["content"]))
+            match = canonical.get(key)
         if match is None:
             found.append(mirror)
         else:
