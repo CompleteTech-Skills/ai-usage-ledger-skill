@@ -41,7 +41,7 @@ jobs:
         working-directory: plandex/app/server
         run: |
           go build ./...
-          go test -race ./usageexport ./model -v
+          go test -count=1 -race ./usageexport ./model -v
       - name: Verify fresh producer exports through all ledger backends
         working-directory: ledger
         run: python tests/check_plandex_native.py --exports "$PLANDEX_TEST_EXPORT_DIR" --evidence "$RUNNER_TEMP/plandex-native-evidence.json"

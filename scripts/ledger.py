@@ -892,6 +892,11 @@ def do_report(args):
     return subprocess.run([sys.executable, os.path.join(HERE, "scoped_report.py")] + args.rest).returncode
 
 
+def do_conversation(args):
+    """Explicit full-content export; independent of usage-store capture settings."""
+    return subprocess.run([sys.executable, os.path.join(HERE, "conversation_export.py")] + args.rest).returncode
+
+
 def do_reinit(args):
     cfg = load_config()
     if cfg and os.path.exists(cfg["store"]["path"]):
@@ -955,6 +960,9 @@ def main():
     rp = sub.add_parser("report", help="render usage and dollar metrics for an exact time window from the store")
     rp.add_argument("rest", nargs=argparse.REMAINDER)
     rp.set_defaults(fn=do_report)
+    cp = sub.add_parser("conversation", help="list or export full recorded conversations from explicitly selected files")
+    cp.add_argument("rest", nargs=argparse.REMAINDER)
+    cp.set_defaults(fn=do_conversation)
     ri = sub.add_parser("reinit", help="fresh onboarding; the previous store is kept with a timestamp")
     ri.add_argument("--yes", action="store_true")
     ri.add_argument("--brand-preset")
@@ -968,6 +976,8 @@ def main():
         sys.exit(do_report(argparse.Namespace(rest=sys.argv[2:])))
     if len(sys.argv) > 1 and sys.argv[1] == "archive":
         sys.exit(do_archive(argparse.Namespace(rest=sys.argv[2:])))
+    if len(sys.argv) > 1 and sys.argv[1] == "conversation":
+        sys.exit(do_conversation(argparse.Namespace(rest=sys.argv[2:])))
     a = ap.parse_args()
     rc = a.fn(a)
     if isinstance(rc, int) and rc:

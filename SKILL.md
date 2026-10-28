@@ -1,7 +1,7 @@
 ---
 name: ai-usage-ledger
 description: >-
-  Compile every locally recorded AI coding-agent model call (Claude Code, Codex CLI/Desktop, GitHub Copilot CLI, Gemini CLI, opencode, OpenClaw, Cline/Roo/Kilo, aider, Kimi Code, Mistral Vibe, Continue, pi, Codebuff and any JSON-logging tool) across the operator's own profile and, when enabled, other drives, user profiles, WSL distros and named SSH hosts into one append-only, de-duplicated ledger stored as SQLite, JSON or CSV; price it at list API rates; split it by subscription account and billing plan; validate it against the tools' own counters; and render a branded light/dark dashboard plus a research-grade study package. Onboards once (branding, theme, storage backend, scheduled refresh, anonymised publication copy; hosts and accounts auto-detected per OS), remembers the preferences, refreshes with one command or on a schedule, renders fifteen ledger documents (statements, memos, briefs, billing evidence) as Markdown, HTML, PDF and DOCX, can anonymise everything for publication, optionally archives the raw log files themselves so they outlive the tools' retention, and answers detailed questions (per day, project, account, model or session, and inside prompt text or the archived logs when those opt-ins are on) through a query layer over the accumulated store. Disclosure: this skill reads agent transcripts and tool databases on this machine and on hosts the operator names, keeps a durable local ledger under ~/.ai-usage-ledger and the chosen working directory, and captures prompt text or credential-derived account claims only when the operator opts in. Use when asked to "find all my AI logs", "how many tokens did I use", "what would this have cost on the API", "compare my subscriptions", "usage by account", "cache savings", "set up my usage ledger", "monthly usage statement", "publish my usage anonymously", or to refresh an existing ledger.
+  Compile every locally recorded AI coding-agent model call (Claude Code, Codex CLI/Desktop, GitHub Copilot CLI, Gemini CLI, opencode, OpenClaw, Cline/Roo/Kilo, aider, Kimi Code, Mistral Vibe, Continue, pi, Codebuff and any JSON-logging tool) across the operator's own profile and, when enabled, other drives, user profiles, WSL distros and named SSH hosts into one append-only, de-duplicated ledger stored as SQLite, JSON or CSV; price it at list API rates; split it by subscription account and billing plan; validate it against the tools' own counters; and render a branded light/dark dashboard plus a research-grade study package. Onboards once (branding, theme, storage backend, scheduled refresh, anonymised publication copy; hosts and accounts auto-detected per OS), remembers the preferences, refreshes with one command or on a schedule, renders fifteen ledger documents (statements, memos, briefs, billing evidence) as Markdown, HTML, PDF and DOCX, can anonymise everything for publication, optionally archives the raw log files themselves so they outlive the tools' retention, explicitly exports full recorded conversations from selected transcript files as private JSON and Markdown, and answers detailed questions (per day, project, account, model or session, and inside prompt text or the archived logs when those opt-ins are on) through a query layer over the accumulated store. Disclosure: this skill reads agent transcripts and tool databases on this machine and on hosts the operator names, keeps a durable local ledger under ~/.ai-usage-ledger and the chosen working directory, and captures prompt text or credential-derived account claims only when the operator opts in. Use when asked to "find all my AI logs", "how many tokens did I use", "what would this have cost on the API", "compare my subscriptions", "usage by account", "cache savings", "set up my usage ledger", "monthly usage statement", "publish my usage anonymously", "export a conversation", "gather an entire conversation", or to refresh an existing ledger.
 version: 1.6.0
 metadata:
   openclaw:
@@ -235,6 +235,21 @@ Relay this table to the operator, in chat or on the terminal, before the first o
 | Append-only | A file is copied when new or grown; the tools only append, so the latest copy is a superset. The index keeps a version count and nothing is deleted. |
 | Reading back | `archive grep` streams through gzip and reports file, line and the timestamp found on the line; `archive restore` decompresses a host (or a path match) into a directory that the scanners can read again. |
 | Size | Expect the size of the tools' log trees (tens of GB for heavy Codex use) at roughly one tenth when compressed. Say so before enabling it on a small disk. |
+
+## Full-Conversation Export
+
+Use `python3 scripts/ledger.py conversation list --source <file>` or
+`conversation export --source <file> --out <new-directory>` when the operator
+explicitly requests the recorded conversation, including assistant messages and
+tool calls/results. These commands read full content from the selected local
+JSON/JSONL files (including gzip copies), not just usage counts. Obtain the
+operator's authorization for those source files before using real transcripts;
+installation and package tests do not grant it. Existing prompt/archive settings
+are not changed, and no source discovery, remote access or scheduling occurs.
+Use synthetic fixtures to validate the feature. See the
+[conversation-export guide](references/conversation-export.md) for formats,
+partial-history behavior and private outputs. Never promise recovery of deleted
+content, hidden reasoning or attachment bytes that are absent from the sources.
 
 ## Answering Detailed Questions
 

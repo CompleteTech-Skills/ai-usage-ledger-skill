@@ -107,13 +107,13 @@ def validate_mermaid(skip: bool) -> None:
 
 def smoke_pipeline() -> None:
     for script in ("run_pipeline.py", "compile_ai_logs.py", "analyze_events.py", "build_report.py", "ledger.py", "ledger_store.py", "detect_hosts.py",
-                   "anonymize.py", "schedule.py", "render_ledger_doc.py", "render_pdf.py", "ledger_archive.py", "ledger_query.py", "scoped_report.py"):
+                   "anonymize.py", "schedule.py", "render_ledger_doc.py", "render_pdf.py", "ledger_archive.py", "ledger_query.py", "scoped_report.py", "conversation_export.py"):
         run([sys.executable, str(ROOT / "scripts" / script), "--help"])
     print("pipeline smoke ok")
 
 
 def run_report_tests() -> None:
-    for pattern in ("test_pricing.py", "test_scoped_report.py", "test_package_mini_swe.py", "test_goose*.py"):
+    for pattern in ("test_pricing.py", "test_scoped_report.py", "test_package_mini_swe.py", "test_goose*.py", "test_conversation_export.py"):
         run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", pattern, "-v"])
     print("pricing, scoped report and Goose native suites ok")
 
