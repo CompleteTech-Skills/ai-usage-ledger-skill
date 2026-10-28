@@ -17,6 +17,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import ledger_store  # noqa: E402
+import mini_swe_usage  # noqa: E402
 import scoped_report as report  # noqa: E402
 
 UTC = timezone.utc
@@ -180,6 +181,14 @@ class AggregationTests(unittest.TestCase):
             with self.subTest(rate=bad_rate), self.assertRaises(ValueError):
                 self.collect([event()], prices)
 
+    def test_unclassified_tokens_require_exact_explicit_partial_evidence(self):
+        partial = event(tool="mini-swe-agent", partial=True, total=420, unclassified_tokens=50)
+        for changes in ({"unclassified_tokens": 49}, {"unclassified_tokens": -1},
+                        {"unclassified_tokens": None}, {"partial": False},
+                        {"tool": "other"}, {"total": 360}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.collect([dict(partial, **changes)])
+
 
 class ArtifactTests(unittest.TestCase):
     def setUp(self):
@@ -276,6 +285,96 @@ class ArtifactTests(unittest.TestCase):
                     self.assertNotIn("private-extra-never-export", output.read_text(encoding="utf-8"))
                 for stored, original in before.items():
                     self.assertEqual(stored.read_bytes(), original)
+
+    def test_explicit_unclassified_mini_swe_tokens_survive_each_store_and_report(self):
+        for kind in ("sqlite", "json", "csv"):
+            with self.subTest(kind=kind):
+                path = self.base / ("unclassified-" + kind)
+                source = self.base / ("unclassified-" + kind + ".jsonl")
+                records = []
+                for index, counts in enumerate(({"prompt_tokens": 100, "total_tokens": 150},
+                                                {"total_tokens": 17})):
+                    snapshot = mini_swe_usage.usage_snapshot(
+                        {"id": "response-%d" % index, "model": "synthetic-model",
+                         "created": datetime(2024, 6, 15, 4, tzinfo=UTC).timestamp(), "usage": counts},
+                        backend="litellm")
+                    record = mini_swe_usage.normalize(snapshot, "synthetic-host", source)
+                    record["unrelated_extra"] = "private-extra-never-export"
+                    records.append(record)
+                self.assertEqual([record["unclassified_tokens"] for record in records], [50, 17])
+                source.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+                store = ledger_store.Store.open(kind, str(path))
+                try:
+                    self.assertEqual(store.ingest_events_file(source), (2, 0))
+                finally:
+                    store.close()
+                stored_files = [path] if kind == "sqlite" else list(path.iterdir())
+                before = {p: p.read_bytes() for p in stored_files}
+                cfg = {"store": {"kind": kind, "path": str(path)}, "timezone": TZ,
+                       "workdir": str(self.base / "work"), "pricing_path": str(self.prices),
+                       "report_config_path": str(self.report_config)}
+
+                out, data = self.generate(cfg)
+
+                self.assertEqual(data["totals"]["total"], 167)
+                self.assertEqual(data["totals"]["unclassified_tokens"], 67)
+                self.assertEqual(data["totals"]["input_uncached"], 100)
+                self.assertEqual(data["totals"]["output"], 0)
+                self.assertEqual(data["totals"]["assumed_calls"], 2)
+                self.assertEqual(data["by_tool"]["mini-swe-agent"]["unclassified_tokens"], 67)
+                self.assertEqual(data["by_model"]["synthetic-model"]["unclassified_tokens"], 67)
+                # Only the 100 categorized input tokens have an applicable rate.
+                self.assertAlmostEqual(data["totals"]["api_equivalent_usd"], .0002)
+                page = (out / "report.html").read_text(encoding="utf-8")
+                self.assertIn("Unclassified tokens (excluded from pricing)", page)
+                with (out / "events.csv").open(encoding="utf-8", newline="") as fh:
+                    rows = list(csv.DictReader(fh))
+                self.assertEqual([row["unclassified_tokens"] for row in rows], ["50", "17"])
+                self.assertEqual([row["pricing_status"] for row in rows], ["assumed", "assumed"])
+                for output in out.iterdir():
+                    self.assertNotIn("private-extra-never-export", output.read_text(encoding="utf-8"))
+                for stored, original in before.items():
+                    self.assertEqual(stored.read_bytes(), original)
+
+    def test_unclassified_token_type_validation_agrees_across_stores(self):
+        for kind in ("sqlite", "json", "csv"):
+            for index, bad_count in enumerate((True, False, 1.0, "1")):
+                with self.subTest(kind=kind, count=bad_count):
+                    path = self.base / ("bad-count-%s-%s" % (kind, index))
+                    source = self.base / ("bad-count-%s-%s.jsonl" % (kind, index))
+                    record = event(tool="mini-swe-agent", partial=True, unclassified_tokens=bad_count,
+                                   total=370 + int(bad_count))
+                    source.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                    store = ledger_store.Store.open(kind, str(path))
+                    try:
+                        store.ingest_events_file(source)
+                    finally:
+                        store.close()
+                    cfg = {"store": {"kind": kind, "path": str(path)}, "timezone": TZ,
+                           "workdir": str(self.base / "work"), "pricing_path": str(self.prices),
+                           "report_config_path": str(self.report_config)}
+                    with self.assertRaisesRegex(ValueError, "invalid.*unclassified_tokens"):
+                        self.generate(cfg)
+
+    def test_unclassified_tokens_require_boolean_partial_on_every_backend(self):
+        for kind in ("sqlite", "json", "csv"):
+            for index, partial in enumerate((1, 1.0, "true", [True])):
+                with self.subTest(kind=kind, partial=partial):
+                    path = self.base / ("partial-flag-%s-%s" % (kind, index))
+                    source = self.base / ("partial-flag-%s-%s.jsonl" % (kind, index))
+                    record = event(tool="mini-swe-agent", partial=partial,
+                                   unclassified_tokens=50, total=420)
+                    source.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                    store = ledger_store.Store.open(kind, str(path))
+                    try:
+                        store.ingest_events_file(source)
+                    finally:
+                        store.close()
+                    cfg = {"store": {"kind": kind, "path": str(path)}, "timezone": TZ,
+                           "workdir": str(self.base / "work"), "pricing_path": str(self.prices),
+                           "report_config_path": str(self.report_config)}
+                    with self.assertRaisesRegex(ValueError, "explicit partial mini-SWE evidence"):
+                        self.generate(cfg)
 
     def test_no_default_query_limit(self):
         cfg = self.config([event(session="session-%d" % i) for i in range(120)])
