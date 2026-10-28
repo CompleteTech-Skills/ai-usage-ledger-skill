@@ -1,0 +1,34 @@
+name: OpenHands installed SDK contract
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  installed-sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@v4
+        with:
+          repository: OpenHands/software-agent-sdk
+          ref: acca181af1f353975965bcf6486e1d0a58f444c0
+          path: upstream-openhands
+          persist-credentials: false
+      - name: Install reviewed SDK with its frozen dependency lock
+        working-directory: upstream-openhands
+        run: |
+          python -m pip install uv
+          uv sync --frozen --no-dev --package openhands-sdk --python 3.12
+      - name: Test real SDK execution and serialization with no provider network
+        run: |
+          "$UV_PROJECT_ENVIRONMENT/bin/python" tests/sdk_contracts/check_openhands_sdk.py

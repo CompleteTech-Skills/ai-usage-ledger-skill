@@ -65,6 +65,24 @@ python scripts/ledger.py report --since 2026-10-03 --until 2026-10-03T16:49:12.6
 
 The bundled snapshot includes explicit Sol 6.1, Sol, Luna and Sonnet 5.5 rates, with sources and verification dates on the updated rows. Older saved snapshots may still price these models through fallbacks. See [scoped reports](references/scoped-reports.md) for boundaries, freshness, artifact paths and pricing limitations.
 
+## OpenHands SDK usage
+
+The [OpenHands integration guide](references/openhands-sdk.md) documents the opt-in
+`scripts/openhands_usage.py` adapter and `collect_conversation` Python helper.
+They read native per-request metrics or existing SDK completion logs, preserve
+missing-evidence diagnostics, and export events for the existing ledger store,
+queries, pricing and reports. No SDK dependency, logging switch, callback replacement,
+source discovery, schedule or external telemetry is introduced.
+
+```bash
+python scripts/openhands_usage.py --help
+python -m unittest discover -s tests -p 'test_openhands_*.py' -v
+```
+
+Full metrics histories are required: network snapshots and cumulative gateway
+usage are not per-request evidence. Metrics without request timestamps remain
+undated; SDK-reported cost is kept separate from API-equivalent pricing.
+
 ## Workflow Diagram
 
 Source: [assets/diagrams/workflow.mmd](assets/diagrams/workflow.mmd).
