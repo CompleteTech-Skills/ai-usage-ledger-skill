@@ -125,6 +125,26 @@ class Anonymizer:
         e["session"] = self.session(e.get("session"))
         if e.get("request_id"):
             e["request_id"] = self.request_id(e["request_id"])
+        # SDK provenance includes identities outside the common scanner columns.
+        # Hash these explicitly: scrub() only detects paths/URLs/e-mails and
+        # deliberately does not recurse into lists. Keep session joins intact.
+        if e.get("response_id"):
+            e["response_id"] = self.request_id(e["response_id"])
+        if e.get("request_namespace"):
+            e["request_namespace"] = self._h("namespace", e["request_namespace"], 12)
+        for key, pseudonym in (("observed_sessions", self.session),
+                               ("usage_ids", lambda v: self._h("usage", v, 12))):
+            if key not in e:
+                continue
+            values = e[key]
+            # Stores accept arbitrary extras, including old/null/malformed data.
+            # Only identifier arrays have defined semantics; omit anything else
+            # rather than crashing, iterating string characters/dict keys, or
+            # copying potentially identifying malformed content to the export.
+            if isinstance(values, list) and all(isinstance(v, str) and v for v in values):
+                e[key] = [pseudonym(v) for v in values]
+            else:
+                e.pop(key)
         if e.get("tool") == "mini-swe-agent":
             for key in ("source_request_id", "invocation_id", "run_id", "agent_id"):
                 if e.get(key):
@@ -132,7 +152,7 @@ class Anonymizer:
         if e.get("tool") == "goose" and isinstance(e.get("goose"), dict):
             e["goose"] = self._goose_evidence(e["goose"])
         e["cwd"] = self.cwd(e.get("cwd"))
-        for k in ("src", "project", "text", "id", "ingested_at", "ledger_identity"):
+        for k in ("src", "usage_source", "project", "text", "id", "ingested_at", "ledger_identity"):
             e.pop(k, None)
         if e.get("account"):
             e["account"] = self.account(e["account"])
