@@ -25,7 +25,7 @@ git -C plandex apply --unidiff-zero "$PWD/integrations/plandex/usage-export.patc
 export PLANDEX_BASE_DIR="$(mktemp -d)"
 export PLANDEX_TEST_EXPORT_DIR="$(mktemp -d)"
 (cd plandex/app/server && go build ./... && \
-  go test -race ./usageexport ./model -v)
+  go test -count=1 -race ./usageexport ./model -v)
 python tests/check_plandex_native.py --exports "$PLANDEX_TEST_EXPORT_DIR" \
   --evidence /absolute/new-test-output/plandex-native-evidence.json
 ```
