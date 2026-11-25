@@ -48,6 +48,8 @@ existing pricing behavior.
 
 ## Outputs and review
 
+For per-account provider counters and explicitly selected historical installation roots, see [Codex lifetime reconciliation](lifetime-reconciliation.md).
+
 Without `--out`, the command creates a new report directory under the configured working directory's `reports` tree. An explicit output directory must be new or empty; existing reports are not silently overwritten. The package contains:
 
 | File | Purpose |

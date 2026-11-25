@@ -381,21 +381,28 @@ def load_codex_threads(root):
     return threads
 
 
-def scan_codex(root, host, out, stats, session_meta, thread_rows):
+def scan_codex(root, host, out, stats, session_meta, thread_rows, *, rollout_paths=None, open_rollout=None):
     dirs = [os.path.join(root, "sessions"), os.path.join(root, "archived_sessions")]
     for d in dirs:
         if not os.path.isdir(d):
             continue
         archived = d.endswith("archived_sessions")
-        for path in walk_files(d, lambda f: f.startswith("rollout-") and f.endswith(".jsonl")):
+        paths = (walk_files(d, lambda f: f.startswith("rollout-") and f.endswith(".jsonl"))
+                 if rollout_paths is None else rollout_paths.get(d, ()))
+        for path in paths:
             stats.files += 1
             try:
                 size = os.path.getsize(path)
             except OSError:
+                if rollout_paths is not None:
+                    stats.errors += 1
                 continue
             stats.bytes += size
-            m = re.search(r"rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-([0-9a-f-]{36})\.jsonl$", os.path.basename(path))
-            thread_id = m.group(1) if m else os.path.basename(path)[:-6]
+            filename = os.path.basename(path)
+            if filename.endswith((".gz", ".zst")):
+                filename = filename.rsplit(".", 1)[0]
+            m = re.search(r"rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-([0-9a-f-]{36})\.jsonl$", filename)
+            thread_id = m.group(1) if m else filename[:-6]
             trow = thread_rows.get(thread_id, {})
             meta = {}
             model = None
@@ -414,12 +421,15 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows):
             in_replay = False     # forked/spawned rollouts start with a replay of the parent's history
             prev_line_ts = None
             try:
-                with open(path, "rb") as fh:
+                with (open_rollout(path) if open_rollout else open(path, "rb")) as fh:
                     for raw in fh:
                         stats.lines += 1
-                        if (b'"token_count"' not in raw and b'"turn_context"' not in raw
-                                and b'"session_meta"' not in raw and b'"user_message"' not in raw
-                                and b'"function_call"' not in raw and b'"custom_tool_call"' not in raw):
+                        if not raw.strip():
+                            continue
+                        participates = (b'"token_count"' in raw or b'"turn_context"' in raw
+                                        or b'"session_meta"' in raw or b'"user_message"' in raw
+                                        or b'"function_call"' in raw or b'"custom_tool_call"' in raw)
+                        if not participates and rollout_paths is None:
                             continue
                         try:
                             d = json.loads(raw)
@@ -427,6 +437,11 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows):
                             stats.errors += 1
                             continue
                         if not isinstance(d, dict):
+                            if rollout_paths is not None:
+                                stats.errors += 1
+                            continue
+                        # Archive validation also reads records outside the replay timeline.
+                        if not participates:
                             continue
                         t = d.get("type")
                         ts = d.get("timestamp")
@@ -442,7 +457,11 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows):
                                 in_replay = False
                         if ts:
                             prev_line_ts = ts
-                        p = d.get("payload") or {}
+                        p = d.get("payload")
+                        if not isinstance(p, dict):
+                            if t in ("session_meta", "turn_context", "response_item", "event_msg"):
+                                stats.errors += 1
+                            continue
                         if t == "session_meta":
                             if meta:
                                 # a second session_meta is the replayed parent's: proof of replay
@@ -450,6 +469,10 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows):
                                 in_replay = True
                                 continue
                             meta = p
+                            native = p.get("id")
+                            if rollout_paths is not None and isinstance(native, str) and re.fullmatch(
+                                    r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", native, re.I):
+                                thread_id = native.lower()
                             forked = bool(p.get("forked_from_id"))
                             src = p.get("source")
                             if isinstance(src, dict) and "subagent" in src:
@@ -458,8 +481,10 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows):
                             continue
                         if t == "turn_context":
                             model = p.get("model") or model
-                            cm = p.get("collaboration_mode") or {}
-                            effort = (cm.get("settings") or {}).get("reasoning_effort") or p.get("reasoning_effort") or effort
+                            cm = p.get("collaboration_mode")
+                            settings = cm.get("settings") if isinstance(cm, dict) else None
+                            effort = ((settings.get("reasoning_effort") if isinstance(settings, dict) else None)
+                                      or p.get("reasoning_effort") or effort)
                             continue
                         if t == "response_item":
                             pt = p.get("type")
@@ -477,13 +502,27 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows):
                         rl = p.get("rate_limits") or {}
                         if isinstance(rl, dict) and rl.get("plan_type"):
                             last_plan = rl.get("plan_type")
-                            last_credits = (rl.get("credits") or {}).get("has_credits")
+                            credits = rl.get("credits")
+                            last_credits = credits.get("has_credits") if isinstance(credits, dict) else None
                             last_limit = rl.get("limit_id")
                         info = p.get("info")
                         if not info:
                             continue
-                        tot = (info.get("total_token_usage") or {}).get("total_tokens")
+                        if not isinstance(info, dict):
+                            stats.errors += 1
+                            continue
+                        cumulative = info.get("total_token_usage") or {}
                         last = info.get("last_token_usage") or {}
+                        if not isinstance(cumulative, dict) or not isinstance(last, dict) or (rollout_paths is not None and not last):
+                            stats.errors += 1
+                            continue
+                        tot = cumulative.get("total_tokens")
+                        inp, cached, output, reasoning = (last.get(field) or 0 for field in
+                                                          ("input_tokens", "cached_input_tokens", "output_tokens",
+                                                           "reasoning_output_tokens"))
+                        if any(type(amount) is not int or amount < 0 for amount in (inp, cached, output, reasoning)):
+                            stats.errors += 1
+                            continue
                         if prev_total is not None and tot == prev_total:
                             stats.dedup += 1
                             continue
@@ -494,15 +533,13 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows):
                             prev_total = tot
                             continue
                         prev_total = tot
-                        inp = last.get("input_tokens") or 0
-                        cached = last.get("cached_input_tokens") or 0
                         e = event(
                             "codex", host, iso(ts), thread_id, model or trow.get("model"),
                             input_uncached=max(inp - cached, 0),
                             cache_read=cached,
                             cache_write=0,
-                            output=last.get("output_tokens") or 0,
-                            reasoning=last.get("reasoning_output_tokens") or 0,
+                            output=output,
+                            reasoning=reasoning,
                             cwd=meta.get("cwd") or trow.get("cwd"),
                             kind="subagent" if forked else "main",
                             parent=meta.get("forked_from_id"),
@@ -519,7 +556,7 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows):
                         out.write(json.dumps(e) + "\n")
                         stats.events += 1
                         n_events_file += 1
-            except OSError as ex:
+            except (OSError, EOFError) as ex:
                 stats.errors += 1
                 sys.stderr.write("ERR %s: %s\n" % (path, ex))
             session_meta.append({

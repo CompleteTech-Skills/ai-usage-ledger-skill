@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a private, time-scoped usage report from the existing ledger, without scanning.
+"""Build a private, time-scoped usage report with optional lifetime reconciliation.
 
 Start bounds are inclusive. Timestamp/``now`` end bounds are inclusive; a date
 end includes that entire local calendar day, ending exclusively at the following
@@ -26,7 +26,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import compile_ai_logs  # noqa: E402
+import installation_history  # noqa: E402
 import ledger_query  # noqa: E402
+import lifetime_reconciliation  # noqa: E402
 import render_ledger_doc  # noqa: E402
 import safety  # noqa: E402
 
@@ -122,15 +124,21 @@ def _read_json(path, label):
     return data
 
 
-def iter_stored_events(kind, path):
+def iter_stored_events(kind, path, *, include_source=False):
     """Read only event columns, without opening credentials, sessions or prompts.
 
     FileStore construction repairs directories and opens every ID index; the
     file backends are therefore streamed directly instead of instantiated.
     """
+    fields = (*READ_FIELDS, "src") if include_source else READ_FIELDS
     if kind == "sqlite":
         db = ledger_query.open_db(kind, str(path))
         try:
+            select = ", ".join(fields)
+            if include_source:
+                columns = {row[1] for row in db.execute("PRAGMA table_info(events)")}
+                if "src" not in columns:
+                    select = ", ".join(READ_FIELDS) + ", NULL AS src"
             cursor = db.execute("SELECT %s, CASE WHEN tool='mu' AND version='mu-usage/1' "
                                 "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
                                 "'$.usage_pricing_eligible') END, CASE WHEN tool='mini-swe-agent' "
@@ -139,9 +147,9 @@ def iter_stored_events(kind, path):
                                 "THEN json_extract(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
                                 "'$.unclassified_tokens') END, CASE WHEN tool='mini-swe-agent' "
                                 "THEN json_type(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END, "
-                                "'$.unclassified_tokens') END FROM events" % ", ".join(READ_FIELDS))
+                                "'$.unclassified_tokens') END FROM events" % select)
             for row in cursor:
-                event = dict(zip(READ_FIELDS, row[:-4]))
+                event = dict(zip(fields, row[:-4]))
                 event["usage_pricing_eligible"] = False if row[-4] == 0 else None
                 if event["tool"] == "mini-swe-agent":
                     event["partial"] = row[-3] == "true"
@@ -158,7 +166,7 @@ def iter_stored_events(kind, path):
             for row in rows:
                 if not isinstance(row, dict):
                     raise ValueError("event store contains a non-object record")
-                event = {key: row.get(key) for key in READ_FIELDS}
+                event = {key: row.get(key) for key in fields}
                 is_mu = row.get("tool") == "mu" and row.get("version") == "mu-usage/1"
                 is_mini_swe = row.get("tool") == "mini-swe-agent"
                 if is_mu or is_mini_swe:
@@ -342,6 +350,75 @@ def _presentation(config):
     return brand, theme
 
 
+def _lifetime_sections(data, table):
+    def number(value):
+        return format(value, ",d") if value is not None else "Unavailable"
+
+    def account(row):
+        return f"{row['account']} ({row['scope']} {row['scope_id']})"
+
+    def difference(window):
+        result = number(window["difference_tokens"])
+        bounds = window["difference_range_tokens"]
+        if bounds and bounds[0] != bounds[1]:
+            return f"{result} (range {number(bounds[0])} to {number(bounds[1])})"
+        if bounds is None and window["difference_tokens"] is not None:
+            return result + " (precision unknown)"
+        return result
+
+    parts = ["## Codex lifetime reconciliation",
+             "Each comparison uses its snapshot time and declared token metric. "
+             "The unattributed pool is shared across accounts for the same time range. "
+             "A difference without dated provider evidence remains unresolved."]
+    rows = []
+    intervals = []
+    for row in data["accounts"]:
+        snapshot, usage = row["snapshot"], row["lifetime"]
+        metric = snapshot["metric_label"] if snapshot else row["metric"]
+        if snapshot and snapshot["precision"] != 1:
+            metric += " (reported precision)"
+        coverage = usage["coverage_percent"]
+        estimate = ("~" if snapshot and snapshot["precision"] != 1 else "")
+        rows.append([account(row), metric, usage["through"], number(usage["provider_tokens"]),
+                     number(usage["confirmed_tokens"]), number(usage["inferred_tokens"]),
+                     number(usage["unattributed_tokens"]), difference(usage), number(row["unresolved_difference_tokens"]),
+                     estimate + coverage + "%" if coverage is not None else "Unavailable", row["status"].replace("_", " ")])
+        for period in row["intervals"]:
+            intervals.append([account(row), period["from"], period["through"], number(period["provider_tokens"]),
+                              number(period["confirmed_tokens"]), difference(period),
+                              period["status"].replace("_", " ")])
+    if rows:
+        parts.append(table(["Account and scope", "Metric", "Observed through (UTC)", "Counter", "Confirmed",
+                            "Inferred", "Unattributed pool", "Difference", "Unresolved", "Coverage", "Status"], rows))
+    else:
+        parts.append("Provide account snapshots to compare lifetime counters.")
+    if intervals:
+        parts.extend(["### Differences between comparable snapshots",
+                      table(["Account and scope", "After (UTC)", "Through (UTC)", "Counter change", "Confirmed",
+                             "Interval difference", "Status"],
+                            intervals)])
+    observed = data["observed"]
+    removed = sum(row["copies_removed"] for row in data["duplicate_sources"])
+    parts.append(table(["Deduplicated Codex tokens", "Unattributed tokens", "Matched copies folded",
+                        "Unusable rows", "Rows without copy evidence", "Conflicting attribution calls"],
+                       [[number(observed["total"]), number(observed["unattributed_total"]), number(removed),
+                         number(data["notes"]["unusable_rows"]), number(data["notes"]["rows_without_copy_key"]),
+                         number(data["notes"]["conflicting_attribution_calls"])]]))
+    parts.extend(["### Source coverage",
+                  "Dates show observed activity. The report data includes explicit attribution windows, normalized snapshots and copy paths."])
+    sources = [*data["recorded_sources"], *data["installation_sources"]]
+    if sources:
+        parts.append(table(["Host", "Harness", "Source", "Status", "Profiles", "First observed (UTC)", "Last observed (UTC)"],
+                           [[row.get("host", ""), row.get("harness", ""), row.get("path", ""), row["status"].replace("_", " "),
+                             row.get("profiles", "").replace("_", " "), row.get("first") or "", row.get("last") or ""] for row in sources]))
+    if evidence := data["evidence_coverage"]:
+        parts.append(table(["Account and scope", "Host", "Evidence from (UTC)", "Evidence until (UTC)",
+                            "First observed (UTC)", "Last observed (UTC)", "Status"],
+                           [[account(row["evidence"]), row["evidence"]["host"], row["evidence"]["since"], row["evidence"]["until"],
+                             row["first"] or "", row["last"] or "", row["status"].replace("_", " ")] for row in evidence]))
+    return parts
+
+
 def render_report(data, pricing, brand, theme):
     """Reuse the document renderer while keeping record text literal in Markdown tables."""
     literals = {}
@@ -374,7 +451,7 @@ def render_report(data, pricing, brand, theme):
              "**%s through %s (%s); start inclusive, end %s.**" % (
                  text(scope["start_local"]), text(scope["end_local"]), text(scope["timezone"]),
                  "inclusive" if scope["end_inclusive"] else "exclusive"),
-             "Every usage total below is limited to these timestamp bounds.", "## Usage and dollar metrics",
+             "The interval usage and dollar metrics use these timestamp bounds.", "## Usage and dollar metrics",
              table(["Metric", "Selected interval"], [
                  ["Recorded tokens", integer(totals["total"])], ["Recorded model calls", integer(totals["calls"])],
                  ["Sessions with recorded calls", integer(data["sessions"])],
@@ -401,9 +478,8 @@ def render_report(data, pricing, brand, theme):
              "Generated: %s. Latest recorded event in the store: %s. Latest event in this interval: %s." % (
                  text(data["generated_at_utc"]), text(data["freshness"]["latest_recorded_event_utc"] or "none"),
                  text(data["freshness"]["latest_in_scope_event_utc"] or "none")),
-             "This command reads the existing ledger and does not refresh source logs. Latest-event timestamps "
-             "indicate recorded activity, not proof that all configured hosts are current. Run `ledger.py run` "
-             "to refresh the ledger before requesting a new report when needed.",
+             "The interval metrics come from the existing ledger. Latest-event timestamps indicate recorded activity. "
+             "Run `ledger.py run` to refresh the store.",
              "## Pricing and assumptions", "Rate snapshot date: %s. Verification dates and sources below "
              "belong to individual rate rows; a snapshot date does not verify every rate." % text(pricing.get("_as_of") or "unspecified")]
     share = data["pricing"]["assumed_share_of_priced_cost"]
@@ -428,13 +504,15 @@ def render_report(data, pricing, brand, theme):
         for model in sorted(applied)]))
     parts += ["The accompanying pricing.json records the rate snapshot and any fallback rules used.",
               "## Coverage and verification",
-              "Only recorded per-call usage is counted. Source retention, malformed logs or missing usage "
-              "fields can leave gaps; this report does not quantify missing source usage. "
-              "No same-period provider-counter comparison is performed. Stored replay filtering and "
-              "de-duplication are preserved; this report does not apply them again.",
+              "Interval totals preserve replay filtering and deduplication from the store. "
+              "Source retention, malformed logs and missing usage fields can leave gaps.",
               "%s stored records had missing, invalid or timezone-naive timestamps and could not be "
               "assigned to this interval. %s hosts contributed recorded calls." % (
                   integer(data["limitations"]["records_with_unusable_timestamps"]), integer(data["contributing_hosts"]))]
+    if "lifetime" in data:
+        parts.extend(_lifetime_sections(data["lifetime"], table))
+    else:
+        parts.append("No same-period provider-counter comparison is performed.")
     page = render_ledger_doc.build_html("\n\n".join(parts), brand, "AI usage for the selected interval", "Usage report", theme)
     # Replace in one pass: dynamic text must never introduce another placeholder.
     page = re.sub(r"SCOPED_LITERAL_\d+_END", lambda match: literals.get(match.group(), match.group()), page)
@@ -457,6 +535,7 @@ def render_report(data, pricing, brand, theme):
     page = page.replace('<div class="foot">', "<p>" + " · ".join(links) + '</p><div class="foot">', 1)
     page = page.replace('</style>', '.themebar{position:static;width:max-content;max-width:calc(100% - 32px);'
                         'margin:12px 16px 12px auto}.band{flex-wrap:wrap}.band img{max-width:100%;object-fit:contain}'
+                        'td{overflow-wrap:anywhere}'
                         '@media(max-width:560px){.band .doctype{margin-left:0;width:100%}}'
                         '</style>', 1)
     # The shared renderer emits its theme script before the buttons exist. Defer
@@ -482,7 +561,17 @@ def _csv_text(value):
     return value
 
 
-def generate_report(config, since, until=None, tz=None, out=None, pricing_path=None, now=None):
+def _capture_codex(events, output, prior_hosts):
+    for event in events:
+        if prior_hosts and str(event.get("host") or "").casefold() in prior_hosts:
+            raise ValueError("prior installation name conflicts with a recorded host. Choose a different name.")
+        if event["tool"] == "codex":
+            output.write(json.dumps(event) + "\n")
+        yield event
+
+
+def generate_report(config, since, until=None, tz=None, out=None, pricing_path=None, now=None, *,
+                    lifetime=(), prior_installs=(), discover_installations=False):
     """Return (output Path, report data). Inputs and the existing store are never modified."""
     generated = now or datetime.now(UTC)
     scope = parse_scope(since, until, tz or config.get("timezone") or "UTC", generated)
@@ -499,7 +588,19 @@ def generate_report(config, since, until=None, tz=None, out=None, pricing_path=N
     if not store.get("path") or not store.get("kind"):
         raise ValueError("no store configured; run ledger.py init first")
     brand, theme = _presentation(config)
-    data, events = collect(iter_stored_events(store["kind"], store["path"]), scope, pricing, generated)
+    inputs = lifetime_reconciliation.read_inputs(lifetime)
+    approved = installation_history.selections(prior_installs)
+    if lifetime or approved or discover_installations:
+        installations = installation_history.inventory() if discover_installations else []
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as recorded:
+            source = iter_stored_events(store["kind"], store["path"], include_source=True)
+            data, events = collect(_capture_codex(source, recorded, approved), scope, pricing, generated)
+            recorded.seek(0)
+            old_usage = installation_history.usage(approved, installations, end=scope.end, end_inclusive=scope.end_inclusive)
+            data["lifetime"] = lifetime_reconciliation.reconcile(map(json.loads, recorded), old_usage,
+                                                                inputs, scope.end, scope.end_inclusive, installations)
+    else:
+        data, events = collect(iter_stored_events(store["kind"], store["path"]), scope, pricing, generated)
     page = render_report(data, pricing, brand, theme)
     if explicit_out is None:
         reports = Path(config["workdir"]) / "reports"
@@ -539,12 +640,20 @@ def main(argv=None):
     parser.add_argument("--tz", help="IANA timezone for dates and naive timestamps (default: configured timezone)")
     parser.add_argument("--out", help="new or empty output directory (default: unique directory under workdir/reports)")
     parser.add_argument("--pricing", help="report-only pricing JSON override; the saved configuration is unchanged")
+    parser.add_argument("--lifetime", metavar="FILE", action="append", default=[],
+                        help="private account-counter and attribution JSON, repeatable")
+    parser.add_argument("--discover-installations", action="store_true",
+                        help="inventory earlier Windows installations and unlettered volumes")
+    parser.add_argument("--prior-install", metavar="NAME=ABSOLUTE_PATH", action="append", default=[],
+                        help="read Codex usage in an approved local installation or mounted backup, repeatable")
     args = parser.parse_args(argv)
     try:
         import ledger
         # load_config() can migrate a manifest and consent; reporting must be read-only.
         config = _read_json(ledger.config_path(), "ledger config")
-        output, data = generate_report(config, args.since, args.until, args.tz, args.out, args.pricing)
+        output, data = generate_report(config, args.since, args.until, args.tz, args.out, args.pricing,
+                                       lifetime=args.lifetime, prior_installs=args.prior_install,
+                                       discover_installations=args.discover_installations)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, ArithmeticError) as ex:
         parser.exit(2, "report: %s\n" % ex)
     print(json.dumps({"report": str(output / "report.html"), "scope": data["scope"], "totals": data["totals"]}, indent=2))

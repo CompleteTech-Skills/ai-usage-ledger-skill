@@ -291,7 +291,30 @@ def check_credential_minimisation():
     home = tempfile.mkdtemp(prefix="ledger-cred-")
     env = dict(os.environ, AI_USAGE_LEDGER_HOME=home)
     ledger = os.path.join(SCRIPTS, "ledger.py")
-    r1 = run([PY, ledger, "init", "--yes", "--set", "detect.wsl=n", "--set", "detect.all_profiles=n"], env=env)
+    fake_root = os.path.join(home, "fakecodex")
+    os.makedirs(fake_root, exist_ok=True)
+    import base64
+    claims = {"https://api.openai.com/auth": {"chatgpt_account_id": "abcdef1234567890", "chatgpt_plan_type": "pro", "organizations": [{"title": "Secret Org"}]}, "https://api.openai.com/profile": {"email": "person@corp.example"}}
+    tok = "h." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".s"
+    json.dump({"tokens": {"id_token": tok, "access_token": "SECRET-ACCESS", "refresh_token": "SECRET-REFRESH"}, "last_refresh": "2026-09-01T00:00:00Z"}, open(os.path.join(fake_root, "auth.json"), "w", encoding="utf-8"))
+    # Keep the CLI onboarding path under test while supplying only the synthetic
+    # discovery result. An opted-in test must never read the operator's home.
+    fixture = """
+import os, runpy, sys
+target, fixture_root, *args = sys.argv[1:]
+sys.path.insert(0, os.path.dirname(target))
+import detect_hosts
+detect_hosts.detect_hosts = lambda *a, **k: ([{
+    "name": "fixture-host", "kind": "local", "codex_roots": [fixture_root], "_found": []
+}], [])
+sys.argv = [target, *args]
+runpy.run_path(target, run_name="__main__")
+"""
+
+    def isolated_init(*args):
+        return run([PY, "-c", fixture, ledger, fake_root, "init", "--yes", *args], env=env)
+
+    r1 = isolated_init("--set", "detect.wsl=n", "--set", "detect.all_profiles=n")
     acc = json.load(open(os.path.join(home, "accounts.json"), encoding="utf-8"))
     blob = json.dumps(acc)
     default_ok = r1.returncode == 0 and "Reading credential files" not in r1.stderr and "@" not in blob and acc.get("_sensitivity") == "placeholders" and "auth.json (last_refresh" not in blob
@@ -302,23 +325,18 @@ def check_credential_minimisation():
     c0 = json.load(open(cfgp, encoding="utf-8"))
     c0.pop("accounts", None)  # a 1.5.4 config had no accounts mapping
     json.dump(c0, open(cfgp, "w", encoding="utf-8"))
-    rl = run([PY, ledger, "init", "--yes"], env=env)
+    rl = isolated_init()
     accl = json.load(open(legacy, encoding="utf-8"))
     legacy_redrafted = rl.returncode == 0 and "redrafted" in rl.stdout and "legacy@corp.example" not in json.dumps(accl) and any(f.startswith("accounts.json.before-") for f in os.listdir(home))
     default_ok = default_ok and legacy_redrafted
     # opt in, minimised: a warning names the files, and no e-mail or organisation title is retained
-    r2 = run([PY, ledger, "init", "--yes", "--set", "accounts.from_credentials=y", "--set", "accounts.identifiable=n"], env=env)
+    r2 = isolated_init("--set", "accounts.from_credentials=y", "--set", "accounts.identifiable=n")
     acc2 = json.load(open(os.path.join(home, "accounts.json"), encoding="utf-8"))
     blob2 = json.dumps(acc2)
     warned = "Reading credential files" in r2.stderr and "minimised" in r2.stderr
-    minimised = r2.returncode == 0 and "@" not in blob2 and all(not v.get("emails") and not v.get("orgs") for v in acc2["accounts"].values())
+    minimised = (r2.returncode == 0 and "codex:abcdef12" in acc2["accounts"] and "@" not in blob2
+                 and all(not v.get("emails") and not v.get("orgs") for v in acc2["accounts"].values()))
     # a synthetic credential file proves the extraction keeps only the claims, and only the identifiable ones on request
-    fake_root = os.path.join(home, "fakecodex")
-    os.makedirs(fake_root, exist_ok=True)
-    import base64
-    claims = {"https://api.openai.com/auth": {"chatgpt_account_id": "abcdef1234567890", "chatgpt_plan_type": "pro", "organizations": [{"title": "Secret Org"}]}, "https://api.openai.com/profile": {"email": "person@corp.example"}}
-    tok = "h." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".s"
-    json.dump({"tokens": {"id_token": tok, "access_token": "SECRET-ACCESS", "refresh_token": "SECRET-REFRESH"}, "last_refresh": "2026-09-01T00:00:00Z"}, open(os.path.join(fake_root, "auth.json"), "w", encoding="utf-8"))
     a_min = detect_hosts.read_codex_account(fake_root, identifiable=False)
     a_id = detect_hosts.read_codex_account(fake_root, identifiable=True)
     extract_ok = (a_min and a_min["id"] == "codex:abcdef12" and a_min["plan"] == "ChatGPT Pro" and not a_min["emails"] and not a_min["orgs"] and "SECRET" not in json.dumps(a_min)

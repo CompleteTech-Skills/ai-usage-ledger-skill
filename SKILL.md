@@ -68,6 +68,8 @@ Relay this table to the operator, in chat or on the terminal, before the first o
 | 7 | When the operator asks a specific question ("how many tokens on Tuesday", "which project cost the most in August", "when did I first use gpt-6", "what did I ask about rate limits"), answer it from the store with `python3 scripts/ledger.py query <preset> [filters]` per the Answering Detailed Questions table, not from the summary tables; go into the archived raw logs (`query logs`) when the answer is in the transcript rather than the counts. |
 | 8 | For a report output covering "since midnight" or another exact interval, use `python3 scripts/ledger.py report --since today --tz <operator-zone>`. It filters stored events before pricing and rendering, shows the cutoff and latest recorded activity, and writes a separate HTML/data package. Use `--pricing <reviewed-snapshot>` for a report-only price override. See [scoped reports](references/scoped-reports.md) for timestamp boundaries, pricing provenance and freshness. |
 
+For provider lifetime counters, use the [Codex lifetime reconciliation workflow](references/lifetime-reconciliation.md). Match the metric and scope, record the account evidence, and collect previous-install usage only from explicitly approved roots.
+
 | Required Fact | Examples |
 |---|---|
 | Hosts and roots | Every `~/.claude`, `~/.codex`, IDE `globalStorage`, gateway `sessions/` directory, with size and date range. |
