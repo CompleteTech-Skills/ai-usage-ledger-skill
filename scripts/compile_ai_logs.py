@@ -398,7 +398,9 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows, *, rollout_pat
                     stats.errors += 1
                 continue
             stats.bytes += size
-            filename = os.path.basename(path).removesuffix(".gz").removesuffix(".zst")
+            filename = os.path.basename(path)
+            if filename.endswith((".gz", ".zst")):
+                filename = filename.rsplit(".", 1)[0]
             m = re.search(r"rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-([0-9a-f-]{36})\.jsonl$", filename)
             thread_id = m.group(1) if m else filename[:-6]
             trow = thread_rows.get(thread_id, {})
