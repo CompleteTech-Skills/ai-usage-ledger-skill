@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build a self-contained HTML dashboard from compiled/summary.json."""
+import csv
 import glob
 import json
 import os
@@ -48,13 +49,60 @@ def _study_url():
 
 STUDY_URL = _study_url()
 
+
+def _session_index(compiled, fallback):
+    """Join session metadata and usage on tool, host and session ID."""
+    rows = {}
+
+    def get(record):
+        key = tuple(record.get(field) or "" for field in ("tool", "host", "session"))
+        if not all(key):
+            return None
+        return rows.setdefault(key, {"tool": key[0], "host": key[1], "session": key[2],
+                                     "first": "", "last": "", "calls": 0, "total": 0, "output": 0})
+
+    csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
+    catalog_path = os.path.join(compiled, "all_sessions.csv")
+    if os.path.isfile(catalog_path):
+        with open(catalog_path, encoding="utf-8", newline="") as stream:
+            for record in csv.DictReader(stream):
+                row = get(record)
+                if row is None:
+                    continue
+                first = record.get("first_ts") or ""
+                last = record.get("last_ts") or first
+                if first and (not row["first"] or first < row["first"]):
+                    row["first"] = first
+                if last > row["last"]:
+                    row["last"] = last
+
+    def add_usage(records):
+        for record in records:
+            row = get(record)
+            if row is not None:
+                for field in ("calls", "total", "output"):
+                    row[field] = int(record.get(field) or 0)
+
+    usage_path = os.path.join(compiled, "by_session.csv")
+    has_usage_index = os.path.isfile(usage_path)
+    if has_usage_index:
+        with open(usage_path, encoding="utf-8", newline="") as stream:
+            add_usage(csv.DictReader(stream))
+    else:
+        add_usage(fallback)
+    return list(rows.values()), has_usage_index
+
+
+session_index, has_usage_index = _session_index(os.path.dirname(src) or ".", S["top_sessions"])
+
 # trim what the page needs
 data = {
     "generated": S["generated"],
     "events": S["events"], "sessions": S["sessions"], "prompts": S["prompts"], "total": S["total"],
     "by_tool": S["by_tool"], "by_tool_host": S["by_tool_host"], "by_model": S["by_model"],
     "by_month_tool": S["by_month_tool"], "by_day_tool": S["by_day_tool"], "by_kind": S["by_kind"],
-    "by_entrypoint": S["by_entrypoint"], "by_project": S["by_project"][:25], "top_sessions": S["top_sessions"][:20],
+    "by_entrypoint": S["by_entrypoint"], "by_project": S["by_project"][:25],
+    "session_index": session_index, "has_usage_index": has_usage_index,
     "inventory": S["inventory"],
     "costs": S.get("costs", {}),
     "accounts": S.get("accounts"),
@@ -199,6 +247,15 @@ tr:last-child td{border-bottom:0}
 td.path{font-family:"IBM Plex Mono",monospace;font-size:12px;word-break:break-all;color:var(--ink-2)}
 .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:7px;vertical-align:-1px}
 .tw{overflow-x:auto}
+.session-controls{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:12px}
+.session-controls label{display:grid;gap:4px;font-size:12px;color:var(--ink-2)}
+.session-controls input,.session-controls select,.session-pages button{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line-2);border-radius:3px;padding:7px 9px}
+.session-controls input{width:min(310px,76vw)}
+.session-controls :focus-visible,.session-pages button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.session-pages{display:flex;align-items:center;gap:8px;margin-top:10px}
+.session-pages button:enabled{cursor:pointer}
+.session-pages button:disabled{opacity:.52}
+.session-pages output{margin-right:auto;font-size:12px;color:var(--ink-2)}
 .bar{height:14px;background:var(--surface-2);position:relative;border-radius:2px;overflow:hidden;min-width:120px}
 .bar b{position:absolute;left:0;top:0;bottom:0;border-radius:0 3px 3px 0}
 details{margin-top:10px}
@@ -248,7 +305,7 @@ __BRAND_HEADER__
 </section>
 
 <section>
-  <div class="sechead"><h2>Accounts</h2><p>who paid for what · attribution rules in accounts.json</p></div>
+  <div class="sechead"><h2>Usage attribution</h2><p>attribution rules in accounts.json</p></div>
   <div class="tw" id="accounts"></div>
   <div class="split" style="margin-top:18px">
     <div>
@@ -256,7 +313,7 @@ __BRAND_HEADER__
       <div class="tw" id="accountMonths"></div>
     </div>
     <div>
-      <div class="sechead"><h2>Billing plan on the call</h2><p>Codex rate_limits.plan_type, recorded per call</p></div>
+      <div class="sechead"><h2>Codex billing plans</h2><p>plan totals across scanned hosts and logins</p></div>
       <div class="tw" id="plans"></div>
       <div class="caveat" id="accountNote" style="margin-top:14px"></div>
     </div>
@@ -324,9 +381,21 @@ __BRAND_HEADER__
   <div class="tw" id="projects"></div>
 </section>
 
-<section>
-  <div class="sechead"><h2>Heaviest sessions</h2><p>top 20 threads by tokens</p></div>
+<section id="session-explorer">
+  <div class="sechead"><h2>Session explorer</h2><p id="sessionCoverage"></p></div>
+  <div class="session-controls">
+    <label>Session ID<input id="sessionSearch" type="search" placeholder="Find a session or thread"></label>
+    <label>Tool<select id="sessionTool"><option value="">All tools</option></select></label>
+    <label>Host<select id="sessionHost"><option value="">All hosts</option></select></label>
+    <label>Usage<select id="sessionUsage"><option value="">All sessions</option><option value="recorded">Recorded usage</option><option value="inventory">Inventory only</option></select></label>
+    <label>Sort<select id="sessionSort"><option value="tokens">Most tokens</option><option value="recent">Most recent</option><option value="calls">Most calls</option></select></label>
+  </div>
   <div class="tw" id="sessions"></div>
+  <div class="session-pages">
+    <output id="sessionRange" aria-live="polite"></output>
+    <button type="button" id="sessionPrevious">Previous</button>
+    <button type="button" id="sessionNext">Next</button>
+  </div>
 </section>
 
 <section>
@@ -339,7 +408,7 @@ __BRAND_HEADER__
   <div class="sechead"><h2>How to read this</h2></div>
   <ul class="notes">
     <li><b>input_uncached</b> is fresh prompt tokens; <b>cache_read</b> is prompt tokens served from the provider cache; <b>cache_write</b> is prompt tokens written to cache (Claude only); <b>output</b> includes reasoning. <b>total</b> is the sum of the four.</li>
-    <li>Codex numbers come from each rollout's <span class="mono">token_count</span> events (summing <span class="mono">last_token_usage</span>). Forked and sub-agent threads replay their parent's history when spawned; those replayed events are dropped so they are not counted twice. Rollout totals match Codex's own <span class="mono">state_5.sqlite</span> per-thread figures within 2% on the threads checked.</li>
+    <li>Codex usage comes from <span class="mono">last_token_usage</span> in the retained rollouts. Forked threads can replay parent history. The validation table compares rollout totals with native per-thread counters and shows how many threads agree within each tolerance.</li>
     <li>Claude Code numbers come from the assistant messages in each session transcript, de-duplicated by message id. Agent transcripts (<span class="mono">agent-*.jsonl</span>) are counted as sub-agent.</li>
     <li><b>API-equivalent cost</b> multiplies each call's tokens by the provider's list price for that model (uncached input, cache read, cache write at the 5-minute or 1-hour rate, output). It is what the same work would have cost on a pay-as-you-go API key. Codex and Claude Code ran on flat-rate subscriptions, so the real outlay for those two is the subscription line. OpenClaw, opencode and Copilot CLI are billed separately (API keys, OpenRouter, GitHub).</li>
     <li><b>Saved by caching</b> compares the API-equivalent cost with the same calls priced as if every prompt token were uncached input.</li>
@@ -518,7 +587,7 @@ function niceStep(x){ const p = Math.pow(10, Math.floor(Math.log10(x))); const f
   const reg = ACC.registry||{}; const tot = ACC.subscription_totals||{};
   const toolOf = k => k.startsWith("codex")?"codex":k.startsWith("claude")?"claude-code":k.startsWith("openclaw")?"openclaw":k.startsWith("opencode")?"opencode":k==="copilot"?"copilot-cli":"codex";
   const rows = Object.entries(tot).sort((a,b)=>b[1].api_equivalent_usd-a[1].api_equivalent_usd);
-  let t = `<table><tr><th>Account</th><th>Plan</th><th class="n">Months</th><th class="n">Paid</th><th class="n">API-equivalent</th><th class="n">If uncached</th><th class="n">API / sub</th><th class="n">Calls</th><th class="n">Tokens</th></tr>`;
+  let t = `<table><tr><th>Attribution label</th><th>Plan</th><th class="n">Months</th><th class="n">Paid</th><th class="n">API-equivalent</th><th class="n">If uncached</th><th class="n">API / sub</th><th class="n">Calls</th><th class="n">Tokens</th></tr>`;
   rows.forEach(([k,r])=>{ const un = k==="unattributed"; t += `<tr><td>${un?"":`<span class="sw" style="background:${col(toolOf(k))}"></span>`}${esc(un?"unattributed":r.label)}<div class="mono" style="font-size:11px;color:var(--ink-3)">${esc(un?"no rule matched":k)}</div></td><td>${esc(un?"unknown":r.plan)}</td><td class="n">${r.months}</td><td class="n">${moneyFull(r.subscription_usd)}</td><td class="n">${moneyFull(r.api_equivalent_usd)}</td><td class="n">${money(r.api_if_uncached_usd)}</td><td class="n">${r.api_to_sub_ratio!=null? r.api_to_sub_ratio+"×":(r.billing==="unknown"?"unknown":"usage-based")}</td><td class="n">${fmt(r.calls)}</td><td class="n">${compact(r.total)}</td></tr>`; });
   // calls that matched no rule are never folded into a real account: they get their own row and a note
   const unRow = ((ACC.by_account||[]).find(r=>r.account==="unattributed")) || (tot.unattributed ? {calls: tot.unattributed.calls, total: tot.unattributed.total} : null);
@@ -536,8 +605,11 @@ function niceStep(x){ const p = Math.pow(10, Math.floor(Math.log10(x))); const f
   let v = `<table><tr><th>Plan on the call</th><th class="n">Calls</th><th class="n">Tokens</th><th class="n">API-equivalent</th></tr>`;
   plans.forEach(r=>{ v += `<tr><td class="mono">${esc(r.plan)}</td><td class="n">${fmt(r.calls)}</td><td class="n">${compact(r.total)}</td><td class="n">${moneyFull(r.api_cost_usd)}</td></tr>`; });
   document.getElementById("plans").innerHTML = v + "</table>";
-  const ub = (ACC.by_billing_month||[]).filter(r=>r.billing==="usage-based");
-  document.getElementById("accountNote").innerHTML = `<b>How accounts were assigned.</b> Codex rollouts record the billing plan on every call but not the account id, so accounts are assigned by the ordered rules in accounts.json (host, plan, working directory, date), each with its evidence and confidence. Calls stamped <span class="mono">self_serve_business_usage_based</span> are billed per token rather than by subscription (${moneyFull(ub.reduce((a,r)=>a+r.api_cost_usd,0))} over ${ub.length} months, real spend at list rates). ${ACC.source==="host placeholders" ? "Accounts are per-host placeholders (credential files were not read; fill in accounts.json to name plans)." : ACC.source==="credential files, minimised" ? "Accounts come from credential files with identity minimised (pseudonymous ids and plan types only)." : "Claude accounts come from each host's <span class=\"mono\">.claude.json</span>."} ${(ACC.rules||[]).filter(r=>r.confidence!=="high").length} of ${(ACC.rules||[]).length} rules are below high confidence; challenge those first.`;
+  const accountSource = ACC.source==="host placeholders"
+    ? "Account labels in this run are host placeholders. The history may include multiple logins on each host."
+    : "Account labels use the evidence and confidence recorded in accounts.json.";
+  document.getElementById("accountNote").textContent =
+    "Each plan row combines all calls that carried that plan stamp. " + accountSource;
 })();
 
 // findings + coverage caveat
@@ -566,7 +638,11 @@ function niceStep(x){ const p = Math.pow(10, Math.floor(Math.log10(x))); const f
     ["F07","Medium","Price assumptions barely move the total", `${(100*sens.share_on_assumed_prices).toFixed(1)}% of API-equivalent cost (${money(sens.cost_on_assumed_prices)}) rests on models without a published rate. Halving or doubling those rates keeps the total between ${money(sens.band_if_assumed_prices_halved_or_doubled[0])} and ${money(sens.band_if_assumed_prices_halved_or_doubled[1])}.`],
   ];
   box.innerHTML = F.map(([c,conf,h,t])=>`<div class="finding"><div class="code">${c}<b>${esc(conf)}</b></div><h3>${esc(h)}</h3><p>${esc(t)}</p></div>`).join("");
-  cov.innerHTML = win ? `<b>Coverage.</b> Claude Code deletes transcripts older than its retention window, so Claude transcripts on ${primary} cover only a recent window. Its own counter (class B evidence) records ${compact(win.tokens)} tokens across ${Object.keys(win.models).length} models since ${(win.firstSessionDate||"").slice(0,10)}, computed ${win.lastComputedDate}. Codex keeps rollouts indefinitely, so Codex coverage is complete for the scanned profiles.<br><br><b>Replay.</b> Spawned Codex threads carry a copy of their parent's history; the Codex app's own counter includes those copies and reports ${compact(D.inventory.reduce((a,i)=>a+i.roots.filter(r=>r.tool==="codex").reduce((b,r)=>b+(r.sqlite_tokens_used||0),0),0))} tokens for these profiles. De-duplicated, the same rollouts hold ${compact(bt.codex.total)} tokens of actual calls; the figures on this page are the de-duplicated ones.` : "";
+  const codexNative = D.inventory.reduce((total, inv) => total +
+    inv.roots.filter(r => r.tool==="codex").reduce((n, r) => n+(r.sqlite_tokens_used||0), 0), 0);
+  const codexCoverage = bt.codex ? `<b>Codex coverage.</b> Retained rollouts contributed ${compact(bt.codex.total)} recorded tokens. The scanned profiles' native counters total ${compact(codexNative)} and can include replayed parent history. The validation table compares the two sources.` : "";
+  const claudeCoverage = win ? `<b>Claude Code coverage.</b> The native counter on ${esc(primary)} records ${compact(win.tokens)} tokens. The session explorer covers the retained transcripts.` : "";
+  cov.innerHTML = [codexCoverage, claudeCoverage].filter(Boolean).join("<br><br>");
 })();
 
 // validation, concentration, distributions
@@ -660,10 +736,50 @@ function niceStep(x){ const p = Math.pow(10, Math.floor(Math.log10(x))); const f
 
 // sessions
 (function(){
-  let t = `<table><tr><th>Tool</th><th>Host</th><th>Session / thread id</th><th class="n">Calls</th><th class="n">Output</th><th class="n">Tokens</th><th class="n">API-eq.</th></tr>`;
-  D.top_sessions.forEach(r=>{ t += `<tr><td><span class="sw" style="background:${col(r.tool)}"></span>${tname(r.tool)}</td><td class="mono">${esc(r.host)}</td><td class="path">${esc(r.session)}</td><td class="n">${fmt(r.calls)}</td><td class="n">${compact(r.output)}</td><td class="n">${compact(r.total)}</td><td class="n">${money(r.api_cost_usd||0)}</td></tr>`; });
-  document.getElementById("sessions").innerHTML = t + "</table>";
+  const rows = D.session_index;
+  const search = document.getElementById("sessionSearch");
+  const tool = document.getElementById("sessionTool");
+  const host = document.getElementById("sessionHost");
+  const usage = document.getElementById("sessionUsage");
+  const sort = document.getElementById("sessionSort");
+  const previous = document.getElementById("sessionPrevious");
+  const next = document.getElementById("sessionNext");
+  const range = document.getElementById("sessionRange");
+  for (const v of [...new Set(rows.map(r => r.tool))].sort()) tool.add(new Option(tname(v), v));
+  for (const v of [...new Set(rows.map(r => r.host))].sort()) host.add(new Option(v, v));
+  document.getElementById("sessionCoverage").textContent = D.has_usage_index
+    ? `${fmt(rows.length)} sessions · ${fmt(rows.filter(r => r.calls>0).length)} with recorded usage`
+    : "Usage summaries available for selected sessions";
+  const pageSize = 50;
+  let page = 0;
+  function render() {
+    const term = search.value.trim().toLowerCase();
+    const matching = rows.filter(r => (!tool.value || r.tool===tool.value)
+      && (!host.value || r.host===host.value) && (!term || r.session.toLowerCase().includes(term))
+      && (!usage.value || (usage.value==="recorded" ? r.calls>0 : r.calls===0)));
+    matching.sort((a,b) => sort.value==="recent" ? b.last.localeCompare(a.last)
+      : sort.value==="calls" ? b.calls-a.calls : b.total-a.total);
+    const start = page*pageSize;
+    const end = Math.min(start+pageSize, matching.length);
+    const body = matching.slice(start,end).map(r => `<tr>
+      <td>${esc(tname(r.tool))}</td><td class="mono">${esc(r.host)}</td><td class="path">${esc(r.session)}</td>
+      <td>${esc(r.last.slice(0,10)||"—")}</td><td class="n">${r.calls ? fmt(r.calls) : "—"}</td>
+      <td class="n">${r.calls ? fmt(r.output) : "—"}</td><td class="n">${r.calls ? fmt(r.total) : "—"}</td></tr>`).join("");
+    document.getElementById("sessions").innerHTML = `<table><thead><tr><th>Tool</th><th>Host</th><th>Session / thread ID</th>
+      <th>Last seen (UTC)</th><th class="n">Calls</th><th class="n">Output</th><th class="n">Tokens</th></tr></thead>
+      <tbody>${body||'<tr><td colspan="7">No sessions match these filters.</td></tr>'}</tbody></table>`;
+    range.textContent = matching.length ? `${fmt(start+1)}–${fmt(end)} of ${fmt(matching.length)} sessions` : "0 sessions";
+    previous.disabled = page===0;
+    next.disabled = end===matching.length;
+  }
+  function reset() { page=0; render(); }
+  search.addEventListener("input",reset);
+  [tool,host,usage,sort].forEach(control=>control.addEventListener("change",reset));
+  previous.addEventListener("click",()=>{page--;render();});
+  next.addEventListener("click",()=>{page++;render();});
+  render();
 })();
+
 
 // inventory
 (function(){

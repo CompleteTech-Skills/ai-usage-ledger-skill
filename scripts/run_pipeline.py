@@ -166,7 +166,10 @@ def scan_host(host, scans_dir, python="python", capture_prompts=False):
             run(ssh + [cmd])
             run(scp + ["%s:%s/out/*" % (target, remote_tmp), out_dir])
         finally:
-            run(ssh + ["rm -rf -- " + shlex.quote(remote_tmp)], check=False)
+            try:
+                run(ssh + ["rm -rf -- " + shlex.quote(remote_tmp)], check=False, timeout=30)
+            except subprocess.TimeoutExpired:
+                log("SSH scratch cleanup timed out after processing %s" % name)
     else:
         raise SystemExit("unknown host kind %r" % kind)
     # optional: stage Codex sqlite and Claude stats-cache for validation

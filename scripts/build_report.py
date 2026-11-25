@@ -594,10 +594,10 @@ def main():
     D.table(["Model", "Input /M", "Cache read /M", "Cache write 5m /M", "Cache write 1h /M", "Output /M", "Basis"], prows, ["l", "r", "r", "r", "r", "r", "l"])
     D.h(3, "2.4 Accounts and subscription attribution")
     _src = (S.get("accounts") or {}).get("source") or "credential files"
-    _how = {"host placeholders": "Accounts are placeholders named after each host: credential files were not read, so plans and billing are unknown until `accounts.json` is filled in.",
+    _how = {"host placeholders": "Account labels in this study are host placeholders. The history may include multiple logins on each host.",
             "credential files, minimised": "Accounts were identified from the credential files on each host with identity minimised: pseudonymous account ids and plan types only, no e-mail addresses or organisation names.",
             "unspecified": "The accounts file does not record how it was drafted; treat its labels as operator-supplied."}.get(_src, "Accounts were identified from the credential files on each host.")
-    D.p(_how + " Codex rollouts record the billing plan on every call (`rate_limits.plan_type`) but not the account, so calls are attributed to accounts by ordered rules in `accounts.json`; each rule carries its evidence and a confidence level. A subscription month is counted only when the account recorded at least one call in that month.")
+    D.p(_how + " Each Codex plan row combines calls that carry the matching `rate_limits.plan_type` across scanned hosts. Account attribution follows ordered rules in `accounts.json`. Each rule records its evidence and confidence. A subscription month is counted when the account recorded at least one call in that month.")
     _un = next((r for r in ACC.get("by_account", []) if r.get("account") == "unattributed"), None)
     if _un:
         D.p("**Unattributed calls.** %s calls (%s tokens, %s API-equivalent) matched no rule in `accounts.json`. They are reported under the account `unattributed` with billing `unknown` rather than folded into any real account; add a rule to `accounts.json` to attribute them." % (fmt(_un["calls"]), compact(_un["total"]), money(_un["api_cost_usd"])))
@@ -769,7 +769,7 @@ def main():
     # ---- 5 uncertainty
     D.h(2, "5. Uncertainty and limitations")
     lim = [
-        "**Retention.** Claude Code transcripts older than the retention window are gone (F06). Codex keeps rollouts indefinitely; Codex coverage is complete for the scanned profiles. Copilot CLI keeps only recent sessions.",
+        "**Retention.** This study covers the retained and readable sources in its inventory. Codex and Claude native counters and older ledgers can include history beyond the current rollout and transcript sets. Copilot CLI coverage depends on its retained sessions.",
         "**Replay filter.** The gap rule that strips replayed history from forked Codex rollouts is a heuristic. A genuine first response arriving within 2 s of the end of the replay burst would be dropped; a pause of more than 2 s inside the burst would leave the rest of the parent's history counted. The per-thread comparison in 2.5 bounds the effect.",
         "**Prices are list prices at one date.** Provider rates change; everything is priced at the sheet in `pricing.json`. Historical months are approximations, not invoices.",
         "**Tokenizer.** Token counts across model generations are not directly comparable as measures of text volume.",

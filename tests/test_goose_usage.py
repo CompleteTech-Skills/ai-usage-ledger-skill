@@ -502,6 +502,20 @@ class DiscoveryTests(unittest.TestCase):
             upload = next(call.args[0] for call in run.call_args_list if call.args[0][0] == "scp")
             self.assertTrue({"goose_usage.py", "native_sources.py", "source_streams.py"} <= {Path(arg).name for arg in upload})
             self.assertEqual(run.call_args_list[-1].args[0][-1], "rm -rf -- " + scratch)
+            self.assertEqual(run.call_args_list[-1].kwargs["timeout"], 30)
+
+    def test_remote_cleanup_timeout_preserves_collected_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            host = {"name": "fixture", "kind": "ssh", "ssh": "user@example.invalid", "remote_tmp": "/tmp/ai-ledger-fixture"}
+            scratch = "/tmp/ai-ledger-fixture.abcdef12"
+
+            def run_remote(command, **kw):
+                if kw.get("timeout") == 30:
+                    raise subprocess.TimeoutExpired(command, 30)
+                return subprocess.CompletedProcess(command, 0, stdout=scratch + "\n")
+
+            with mock.patch.object(run_pipeline, "run", side_effect=run_remote):
+                self.assertEqual(run_pipeline.scan_host(host, tmp), {})
 
 
 class EndToEndTests(unittest.TestCase):
