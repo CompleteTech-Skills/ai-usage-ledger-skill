@@ -62,6 +62,19 @@ def run(cmd, check=True, **kw):
     return r
 
 
+ROOT_FLAGS = {
+    "claude_roots": "--claude-root", "claude_desktop_roots": "--claude-desktop-root", "codex_roots": "--codex-root",
+    "copilot_roots": "--copilot-root", "opencode_dbs": "--opencode-db", "openclaw_roots": "--openclaw-root",
+    "gemini_roots": "--gemini-root", "qwen_roots": "--qwen-root", "aider_roots": "--aider-root", "kimi_roots": "--kimi-root",
+    "vibe_roots": "--vibe-root", "continue_roots": "--continue-root", "pi_roots": "--pi-root",
+    "mini_swe_roots": "--mini-swe-root", "dsh_roots": "--dsh-root", "paseo_roots": "--paseo-root",
+}
+PREFIXED_ROOT_FLAGS = {
+    "goose_roots": "--goose-root", "cline_roots": "--cline-root", "generic_roots": "--generic-root",
+    "native_counter_dbs": "--native-counter-db",
+}
+
+
 def scan_args(host, capture_prompts=False):
     """Translate a manifest host entry into compile_ai_logs.py scan arguments. Prompt text is recorded only when the
     manifest says capture_prompts: true (ledger.py writes it from the prompts.capture preference); every other scan,
@@ -69,28 +82,9 @@ def scan_args(host, capture_prompts=False):
     args = ["scan", "--host", safety.check_path(host["name"], "host name")]
     if not capture_prompts:
         args.append("--no-prompts")
-    for key in ("claude_roots", "codex_roots", "copilot_roots", "opencode_dbs", "openclaw_roots", "gemini_roots", "qwen_roots", "aider_roots", "kimi_roots",
-                "vibe_roots", "continue_roots", "pi_roots", "mini_swe_roots", "goose_roots", "cline_roots", "generic_roots"):
+    for key, flag in {**ROOT_FLAGS, **PREFIXED_ROOT_FLAGS}.items():
         for r in host.get(key, []):
-            safety.check_path(r, key)
-    for r in host.get("claude_roots", []):
-        args += ["--claude-root", r]
-    for r in host.get("codex_roots", []):
-        args += ["--codex-root", r]
-    for r in host.get("copilot_roots", []):
-        args += ["--copilot-root", r]
-    for r in host.get("opencode_dbs", []):
-        args += ["--opencode-db", r]
-    for r in host.get("openclaw_roots", []):
-        args += ["--openclaw-root", r]
-    for key, flag in (("gemini_roots", "--gemini-root"), ("qwen_roots", "--qwen-root"), ("aider_roots", "--aider-root"), ("kimi_roots", "--kimi-root"),
-                      ("vibe_roots", "--vibe-root"), ("continue_roots", "--continue-root"), ("pi_roots", "--pi-root"), ("mini_swe_roots", "--mini-swe-root"), ("goose_roots", "--goose-root")):
-        for r in host.get(key, []):
-            args += [flag, r]
-    for r in host.get("cline_roots", []):      # "cline=<dir>", "roo-code=<dir>", "kilo-code=<dir>"
-        args += ["--cline-root", r]
-    for r in host.get("generic_roots", []):    # "<tool>=<dir>"
-        args += ["--generic-root", r]
+            args += [flag, safety.check_path(r, key)]
     return args
 
 
@@ -131,9 +125,9 @@ def scan_host(host, scans_dir, python="python", capture_prompts=False):
                 raise SystemExit("WSL scan failed for %s and no share_fallback given" % name)
             log("WSL service refused the call; falling back to the share %s (slower, and file counts can come up short: compare the inventory with a native `find` and rescan the host with `ledger.py run --hosts %s` once WSL responds)" % (share, name))
             alt = dict(host)
-            for key in ("claude_roots", "codex_roots", "copilot_roots", "opencode_dbs", "openclaw_roots", "gemini_roots", "qwen_roots", "aider_roots", "kimi_roots", "vibe_roots", "continue_roots", "pi_roots", "mini_swe_roots"):
+            for key in ROOT_FLAGS:
                 alt[key] = [share.rstrip("/\\") + p for p in host.get(key, [])]
-            for key in ("cline_roots", "generic_roots", "goose_roots"):
+            for key in PREFIXED_ROOT_FLAGS:
                 alt[key] = [(x.split("=", 1)[0] + "=" + share.rstrip("/\\") + x.split("=", 1)[1]) if "=" in x else share.rstrip("/\\") + x for x in host.get(key, [])]
             # sqlite over a UNC share cannot be opened via URI; copy the opencode db locally first
             if alt.get("opencode_dbs"):
@@ -150,21 +144,29 @@ def scan_host(host, scans_dir, python="python", capture_prompts=False):
     elif kind == "ssh":
         # every remote-shell word is validated against a strict grammar and quoted; the target is checked so it
         # cannot smuggle ssh/scp options
-        target, remote_tmp, remote_python = safety.validate_ssh_host(host)
+        target, remote_prefix, remote_python = safety.validate_ssh_host(host)
+        options = safety.ssh_config_options(host)
+        ssh = ["ssh", *options, "-o", "BatchMode=yes", "--", target]
+        scp = ["scp", *options, "-q", "--"]
+        scanner_args = scan_args(host, capture_prompts)
+        template = remote_prefix.rstrip("/") + ".XXXXXXXX"
+        result = run(ssh + ["mktemp -d -- " + shlex.quote(template)], capture_output=True, text=True)
+        remote_tmp = result.stdout.strip()
+        if (not safety.REMOTE_PATH_RE.fullmatch(remote_tmp)
+                or not remote_tmp.startswith(template[:-8])
+                or len(remote_tmp) != len(template)
+                or not remote_tmp[-8:].isalnum()):
+            raise SystemExit("remote mktemp did not return the expected private staging path")
         try:
-            # owner-only staging (0700) before anything is written; the scanner tightens its own out dir and files
-            run(["ssh", "-o", "BatchMode=yes", "--", target, "install -d -m 700 -- " + shlex.quote(remote_tmp)])
-            run(["scp", "-q", "--", SCANNER, "%s:%s" % (target, shlex.quote(remote_tmp + "/compile_ai_logs.py"))])
-            run(["scp", "-q", "--", os.path.join(HERE, "safety.py"), "%s:%s" % (target, shlex.quote(remote_tmp + "/safety.py"))])
+            modules = ["safety.py", "goose_usage.py", "source_streams.py", "native_sources.py"]
             if host.get("mini_swe_roots"):
-                run(["scp", "-q", "--", os.path.join(HERE, "mini_swe_usage.py"), "%s:%s" % (target, shlex.quote(remote_tmp + "/mini_swe_usage.py"))])
-            run(["scp", "-q", "--", os.path.join(HERE, "goose_usage.py"), "%s:%s" % (target, shlex.quote(remote_tmp + "/goose_usage.py"))])
-            cmd = " ".join([shlex.quote(remote_python), shlex.quote(remote_tmp + "/compile_ai_logs.py")] + [shlex.quote(x) for x in scan_args(host, capture_prompts)] + ["--out-dir", shlex.quote(remote_tmp + "/out")])
-            run(["ssh", "-o", "BatchMode=yes", "--", target, cmd])
-            run(["scp", "-q", "--", "%s:%s" % (target, shlex.quote(remote_tmp + "/out") + "/*"), out_dir])
+                modules.append("mini_swe_usage.py")
+            run(scp + [SCANNER, *[os.path.join(HERE, module) for module in modules], "%s:%s/" % (target, remote_tmp)])
+            cmd = shlex.join([remote_python, remote_tmp + "/compile_ai_logs.py", *scanner_args, "--out-dir", remote_tmp + "/out"])
+            run(ssh + [cmd])
+            run(scp + ["%s:%s/out/*" % (target, remote_tmp), out_dir])
         finally:
-            # the staging dir holds the scanner, prompts and scanned data: remove it after retrieval, on success and failure alike
-            run(["ssh", "-o", "BatchMode=yes", "--", target, "rm -rf -- " + shlex.quote(remote_tmp)], check=False)
+            run(ssh + ["rm -rf -- " + shlex.quote(remote_tmp)], check=False)
     else:
         raise SystemExit("unknown host kind %r" % kind)
     # optional: stage Codex sqlite and Claude stats-cache for validation
@@ -179,7 +181,7 @@ def scan_host(host, scans_dir, python="python", capture_prompts=False):
                 target, _, _ = safety.validate_ssh_host(host)
                 if not safety.REMOTE_PATH_RE.match(str(src)):
                     raise safety.UnsafeValue("%s on %s is not a plain absolute path: %r" % (key, name, src))
-                run(["scp", "-q", "--", "%s:%s" % (target, shlex.quote(str(src))), dst])
+                run(["scp", *safety.ssh_config_options(host), "-q", "--", "%s:%s" % (target, shlex.quote(str(src))), dst])
             elif kind == "wsl" and not os.path.exists(src):
                 share = host.get("share_fallback", "")
                 shutil.copy(share.rstrip("/\\") + src, dst)
@@ -231,10 +233,10 @@ def main():
         safety.warn_if_writable(p, log)
     safety.check_path(work, "workdir")
     for h in M["hosts"]:  # root paths in the manifest are also manifest-relative when not absolute
-        for key in ("claude_roots", "codex_roots", "copilot_roots", "opencode_dbs", "openclaw_roots", "gemini_roots", "qwen_roots", "aider_roots", "kimi_roots", "vibe_roots", "continue_roots", "pi_roots", "mini_swe_roots"):
+        for key in ROOT_FLAGS:
             if h.get("kind", "local") in ("local", "share") and h.get(key):
                 h[key] = [rel(x) for x in h[key]]
-        for key in ("cline_roots", "generic_roots", "goose_roots"):
+        for key in PREFIXED_ROOT_FLAGS:
             if h.get("kind", "local") in ("local", "share") and h.get(key):
                 h[key] = [(x.split("=", 1)[0] + "=" + rel(x.split("=", 1)[1])) if "=" in x else rel(x) for x in h[key]]
         for key in ("codex_sqlite", "claude_stats_cache"):

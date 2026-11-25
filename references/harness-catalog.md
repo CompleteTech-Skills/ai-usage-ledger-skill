@@ -13,9 +13,9 @@ Generic sniffer boundary: `--generic-root <tool>=<dir>` reads every `.json` / `.
 | Tool | Where | Records | Token fields | Scanner |
 |---|---|---|---|---|
 | Claude Code / Claude Agent SDK | `~/.claude/projects/<cwd-slug>/<session>.jsonl`, `agent-*.jsonl`; counter `~/.claude/stats-cache.json`; prompts `~/.claude/history.jsonl` | one JSON per line; assistant lines carry `message.usage` | `input_tokens` (uncached), `cache_read_input_tokens`, `cache_creation_input_tokens` (+ `cache_creation.ephemeral_5m/1h_input_tokens`), `output_tokens`, `output_tokens_details.thinking_tokens` | built-in |
-| Codex CLI / Codex Desktop / Codex VS Code | `${CODEX_HOME:-~/.codex}/sessions/YYYY/MM/DD/rollout-*.jsonl`, `archived_sessions/`; counter `state_5.sqlite`; prompts `history.jsonl` | `event_msg` / `token_count` events | `last_token_usage.{input_tokens (incl. cached), cached_input_tokens, output_tokens, reasoning_output_tokens}`; `rate_limits.plan_type` per call; replay on fork (see pitfalls) | built-in |
-| GitHub Copilot CLI | `${COPILOT_HOME:-~/.copilot}/session-state/<id>/events.jsonl` | typed events | `session.shutdown.data.tokenDetails.{input,cache_read,cache_write,output}.tokenCount`; `assistant.message.outputTokens` | built-in |
-| opencode | `${OPENCODE_DATA_DIR:-~/.local/share/opencode}/opencode.db` (older: `storage/message/*/*.json`) | SQLite `message.data` JSON | `tokens.{input,output,reasoning,cache.read,cache.write}`, `cost`, `modelID`, `providerID` | built-in |
+| Codex CLI / Codex Desktop / Codex VS Code | `${CODEX_HOME:-~/.codex}/sessions/YYYY/MM/DD/rollout-*.jsonl`, `archived_sessions/`; counter `state_5.sqlite`; prompts `history.jsonl` | `event_msg` / `token_count` events in plain, gzip or Zstandard files | `last_token_usage.{input_tokens (incl. cached), cached_input_tokens, output_tokens, reasoning_output_tokens}`; `rate_limits.plan_type` per call; replay on fork (see pitfalls) | built-in |
+| GitHub Copilot CLI | `${COPILOT_HOME:-~/.copilot}/session-state/<id>/events.jsonl` and optional `session-store.db` | typed events and SQLite usage counters | `session.shutdown.data.tokenDetails.{input,cache_read,cache_write,output}.tokenCount`; `assistant.message.outputTokens`; native `assistant_usage_events` | built-in; SQLite counters reported separately |
+| opencode | `${OPENCODE_DATA_DIR:-~/.local/share/opencode}/opencode.db` (older: `storage/message/*/*.json`) | SQLite `message.data` and `session_message.data` JSON | `tokens.{input,output,reasoning,cache.read,cache.write}`, `cost`, model/provider IDs | built-in |
 | Gemini CLI | `${GEMINI_DATA_DIR:-~/.gemini/tmp}/<project_hash>/chats/session-*.json[l]`; sub-agents nested | JSON (older) or JSONL; header + `messages[]` | per `gemini` message: `tokens.{input,output,cached,thoughts,tool,total}`, `model`, `timestamp` | built-in |
 | Kimi Code CLI | `~/.kimi/sessions/<wd-hash>/<session>/wire.jsonl` (+ `subagents/<id>/`), older `~/.kimi-code/sessions/<ws>/<session>/agents/<agent>/wire.jsonl`; `context.jsonl`, `state.json` | JSONL wire events | `StatusUpdate` records: `token_usage.{input_other, input_cache_read, input_cache_creation, output}` (or `usage.inputOther/...`); count turn-scoped records only, session-scoped ones are cumulative | built-in |
 | Mistral Vibe | `${VIBE_HOME:-~/.vibe}/logs/session/<id>/meta.json` + `messages.jsonl`; sub-agents under `agents/` | JSON meta, JSONL messages | `meta.json.stats.{session_prompt_tokens, session_completion_tokens, session_cost}`, model config and prices; no per-message usage | built-in (session-level) |
@@ -30,7 +30,9 @@ Generic sniffer boundary: `--generic-root <tool>=<dir>` reads every `.json` / `.
 | Crush (Charm) | `~/.local/share/crush` (`%LOCALAPPDATA%\crush`) SQLite; `crush stats` builds its own HTML | SQLite `sessions`, `messages` | prompt/completion tokens and cost per message (columns verify) | session-level (query) |
 | Qwen Code | `${QWEN_DATA_DIR:-~/.qwen}/history/<project_hash>/` | Gemini-CLI-derived JSON | as Gemini CLI (verify) | generic |
 | Grok Build CLI | `${GROK_HOME:-~/.grok}/grok.db` | SQLite sessions/transcripts | usage columns (verify) | session-level (query) |
-| Hermes Agent | `${HERMES_HOME:-~/.hermes}/state.db` | SQLite | verify | session-level (query) |
+| Hermes Agent | `${HERMES_HOME:-~/.hermes}/state.db` or an explicit platform data location | SQLite `session_model_usage` | native token and API-call totals by session and model | explicit counter database; reported separately |
+| DeepSeek Harness (DSH) | `~/.dsh/sessions` | v0 JSONL journal, often Zstandard-compressed | completed `assistant/message` steps with input, output, cache-read and reasoning tokens | explicit `dsh_roots` |
+| Paseo transcript exports | explicitly configured local directories of `.tar.gz` exports | archive members under `transcripts/` | observed Claude assistant usage in archived copies | explicit `paseo_roots`; separate archive evidence |
 | Kilo CLI | `${KILO_DATA_DIR:-~/.local/share/kilo}` | opencode-derived | as opencode (verify) | generic |
 | ZCode | `${ZCODE_HOME:-~/.zcode}` | verify | verify | generic |
 | OpenClaw gateways | `<config>/agents/<agent>/sessions/*.jsonl`; `${OPENCLAW_DIR:-~/.openclaw}` | JSONL | `message.usage.{input,output,cacheRead,cacheWrite,cost.total}`; checkpoint files replay | built-in |
@@ -57,7 +59,8 @@ Generic sniffer boundary: `--generic-root <tool>=<dir>` reads every `.json` / `.
 | Augment | cloud sessions | – | none locally | export |
 | Sourcegraph Cody | VS Code local storage; export to JSON from the chat UI | JSON export | none | none |
 | Kiro (IDE + CLI) | `~/.kiro/` local database; enterprise prompt logging to S3 | SQLite | context breakdown in UI; verify columns | session-level (query) |
-| Claude desktop app, ChatGPT desktop, claude.ai, chatgpt.com | no local transcripts | – | – | export (account data export) |
+| Claude Desktop agent mode / Cowork | explicit local agent-mode transcript directories | JSONL with assistant `message.usage` | Claude input, output and cache token observations | explicit `claude_desktop_roots` |
+| Claude and ChatGPT cloud chat | account data exports | account-dependent | account-dependent | export |
 
 ## Gateways, proxies and inference runtimes
 

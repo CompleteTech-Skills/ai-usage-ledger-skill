@@ -247,6 +247,7 @@ class Archive:
         safety.check_host_name(host)
         cfg = ssh_cfg if isinstance(ssh_cfg, dict) else {"ssh": ssh_cfg}
         target, _, _ = safety.validate_ssh_host(cfg)
+        ssh = ["ssh", *safety.ssh_config_options(cfg), "-o", "BatchMode=yes", "--", target]
         known = self._known(host)
         wanted = []
         creds = 0
@@ -268,7 +269,7 @@ class Archive:
         if not wanted:
             return 0, 0, 0
         # size+mtime first so unchanged files are not transferred (bytes mode: no CRLF translation on Windows)
-        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "--", target, self.REMOTE_STAT], input=("\0".join(wanted) + "\0").encode("utf-8"), capture_output=True)
+        r = subprocess.run(ssh + [self.REMOTE_STAT], input=("\0".join(wanted) + "\0").encode("utf-8"), capture_output=True)
         if r.returncode not in (0, 123):  # 123: xargs ran but some files did not exist, which is expected for optional counters
             log("  ssh stat failed for %s: %s" % (host, safety.clean_for_terminal(r.stderr.decode("utf-8", "replace")[-300:], limit=300)))
         remote = {}
@@ -280,7 +281,7 @@ class Archive:
         if not todo:
             return 0, 0, 0
         started = now()
-        proc = subprocess.Popen(["ssh", "-o", "BatchMode=yes", "--", target, self.REMOTE_TAR], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(ssh + [self.REMOTE_TAR], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         out, err = proc.communicate(input=("\0".join(todo) + "\0").encode("utf-8"))
         if proc.returncode not in (0, 1):  # 1 = some files changed while reading; acceptable for append-only logs
             log("  ssh tar failed for %s: %s" % (host, safety.clean_for_terminal(err.decode("utf-8", "replace")[-300:], limit=300)))

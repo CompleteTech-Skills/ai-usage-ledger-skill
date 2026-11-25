@@ -79,6 +79,16 @@ def validate_ssh_host(host):
     return target, remote_tmp, python
 
 
+def ssh_config_options(host):
+    path = check_path(host.get("ssh_config"), "SSH config")
+    if not path:
+        return []
+    if not os.path.isabs(path) or not os.path.isfile(path):
+        raise UnsafeValue("SSH config must be an existing absolute file")
+    refuse_if_shared(path, "SSH config")
+    return ["-F", path]
+
+
 def validate_local_python(host, default):
     """local/share hosts launch this interpreter directly, so a manifest-supplied value selects the executable.
     The default comes from --python (this process), never from the manifest."""

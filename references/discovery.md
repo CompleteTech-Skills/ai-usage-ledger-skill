@@ -16,6 +16,8 @@
 
 ## What the detector covers
 
+[Extended local usage sources](extended-local-sources.md) documents compressed Codex histories, OpenCode's newer message table, and explicit roots for Claude Desktop, DSH, Paseo and native usage counters.
+
 | Platform | Home directories | Extra locations |
 |---|---|---|
 | Windows | `%USERPROFILE%`; with `--all-profiles` every `<drive>:\Users\<name>` on every mounted drive | `%APPDATA%\{Code, Code - Insiders, VSCodium, Cursor, Windsurf, Trae, Kiro, Antigravity}\User\globalStorage` for Cline / Roo / Kilo; `%LOCALAPPDATA%` tools |

@@ -19,8 +19,9 @@ import os
 import re
 import sqlite3
 import sys
+import tarfile
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 # safety.py holds the shared predicates; this file is also copied alone to SSH hosts (run_pipeline.py scp's only the
@@ -32,6 +33,8 @@ except ImportError:  # standalone copy on a remote host
     _safety = None
 
 import goose_usage  # noqa: E402 -- resolve sibling modules for importlib callers too
+import native_sources  # noqa: E402
+import source_streams  # noqa: E402
 
 _FALLBACK_CRED_BASENAMES = ("auth.json", ".credentials.json", "credentials.json", ".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 _FALLBACK_CRED_PATTERNS = re.compile(r"(?:^|[^a-z])(?:token|secret|credential|password|passwd|apikey|api_key)(?:[^a-z]|$)|\.pem$|\.key$|\.p12$|\.pfx$|^\.env\.|^id_rsa|^id_ed25519", re.IGNORECASE)
@@ -206,6 +209,7 @@ class Stats:
         self.lines = 0
         self.events = 0
         self.errors = 0
+        self.read_errors = 0
         self.skipped_replay = 0
         self.dedup = 0
         self.t0 = time.time()
@@ -221,12 +225,14 @@ class Stats:
 # Claude Code   ~/.claude/projects/<proj>/<session>.jsonl  (+ agent-*.jsonl)
 # ----------------------------------------------------------------------------
 
-def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
-    proj_root = os.path.join(root, "projects")
+def scan_claude(root, host, out, stats, seen_msg_ids, session_meta, desktop=False):
+    proj_root = root if desktop else os.path.join(root, "projects")
     if not os.path.isdir(proj_root):
         return
     for path in walk_files(proj_root, lambda f: f.endswith(".jsonl")):
         path = os.path.abspath(path)
+        if desktop and is_credential_file(path):
+            continue
         stats.files += 1
         try:
             size = os.path.getsize(path)
@@ -239,7 +245,7 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
         session_id = None
         cwd = None
         version = None
-        entrypoint = None
+        entrypoint = "claude-desktop" if desktop else None
         first_ts = None
         last_ts = None
         n_user = 0
@@ -258,9 +264,9 @@ def scan_claude(root, host, out, stats, seen_msg_ids, session_meta):
                     if not isinstance(d, dict):
                         continue
                     t = d.get("type")
-                    ts = d.get("timestamp")
-                    if session_id is None and d.get("sessionId"):
-                        session_id = d["sessionId"]
+                    ts = d.get("timestamp") or (d.get("_audit_timestamp") if desktop else None)
+                    if session_id is None:
+                        session_id = d.get("sessionId") or (d.get("session_id") if desktop else None)
                     if cwd is None and d.get("cwd"):
                         cwd = d["cwd"]
                     if version is None and d.get("version"):
@@ -381,196 +387,215 @@ def load_codex_threads(root):
     return threads
 
 
-def scan_codex(root, host, out, stats, session_meta, thread_rows, *, rollout_paths=None, open_rollout=None):
+def codex_rollouts(root):
     dirs = [os.path.join(root, "sessions"), os.path.join(root, "archived_sessions")]
     for d in dirs:
-        if not os.path.isdir(d):
+        for path in walk_files(d, lambda f: f.startswith("rollout-") and source_streams.uncompressed_name(f).endswith(".jsonl")):
+            yield path, d.endswith("archived_sessions")
+
+
+def scan_codex(root, host, out, stats, session_meta, thread_rows, rollouts=None, mirror_events=None,
+               *, rollout_paths=None, open_rollout=None):
+    archive_mode = rollout_paths is not None
+    if archive_mode:
+        dirs = [os.path.join(root, "sessions"), os.path.join(root, "archived_sessions")]
+        rollouts = [(path, d.endswith("archived_sessions")) for d in dirs for path in rollout_paths.get(d, ())]
+    if rollouts is None:
+        rollouts = list(codex_rollouts(root))
+        counts = Counter(source_streams.uncompressed_name(path) for path, _ in rollouts)
+        mirror_events = {name: set() for name, count in counts.items() if count > 1}
+    mirror_events = mirror_events or {}
+    for path, archived in rollouts:
+        filename = source_streams.uncompressed_name(path)
+        mirror = mirror_events.get(filename)
+        file_usage = set() if mirror is not None else None
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            stats.read_errors += 1
+            stats.errors += 1
             continue
-        archived = d.endswith("archived_sessions")
-        paths = (walk_files(d, lambda f: f.startswith("rollout-") and f.endswith(".jsonl"))
-                 if rollout_paths is None else rollout_paths.get(d, ()))
-        for path in paths:
-            stats.files += 1
-            try:
-                size = os.path.getsize(path)
-            except OSError:
-                if rollout_paths is not None:
-                    stats.errors += 1
-                continue
-            stats.bytes += size
-            filename = os.path.basename(path)
-            if filename.endswith((".gz", ".zst")):
-                filename = filename.rsplit(".", 1)[0]
-            m = re.search(r"rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-([0-9a-f-]{36})\.jsonl$", filename)
-            thread_id = m.group(1) if m else filename[:-6]
-            trow = thread_rows.get(thread_id, {})
-            meta = {}
-            model = None
-            effort = None
-            first_line_ts = None
-            last_ts = None
-            prev_total = None
-            forked = False
-            n_user = 0
-            n_tool = 0
-            n_events_file = 0
-            last_plan = None
-            last_credits = None
-            last_limit = None
-            plan_counts = {}
-            in_replay = False     # forked/spawned rollouts start with a replay of the parent's history
-            prev_line_ts = None
-            try:
-                with (open_rollout(path) if open_rollout else open(path, "rb")) as fh:
-                    for raw in fh:
-                        stats.lines += 1
-                        if not raw.strip():
-                            continue
-                        participates = (b'"token_count"' in raw or b'"turn_context"' in raw
-                                        or b'"session_meta"' in raw or b'"user_message"' in raw
-                                        or b'"function_call"' in raw or b'"custom_tool_call"' in raw)
-                        if not participates and rollout_paths is None:
-                            continue
-                        try:
-                            d = json.loads(raw)
-                        except Exception:
+        stats.files += 1
+        stats.bytes += size
+        m = re.search(r"rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-([0-9a-f-]{36})\.jsonl$", filename)
+        thread_id = m.group(1) if m else filename[:-6]
+        trow = thread_rows.get(thread_id, {})
+        meta = {}
+        model = None
+        effort = None
+        first_line_ts = None
+        last_ts = None
+        prev_total = None
+        forked = False
+        n_user = 0
+        n_tool = 0
+        n_events_file = 0
+        last_plan = None
+        last_credits = None
+        last_limit = None
+        plan_counts = {}
+        in_replay = False     # forked/spawned rollouts start with a replay of the parent's history
+        prev_line_ts = None
+        try:
+            with (open_rollout(path) if open_rollout else source_streams.open_lines(path)) as fh:
+                for raw in fh:
+                    stats.lines += 1
+                    if not raw.strip():
+                        continue
+                    participates = any(marker in raw for marker in
+                                       (b'"token_count"', b'"turn_context"', b'"session_meta"', b'"user_message"',
+                                        b'"function_call"', b'"custom_tool_call"'))
+                    if not participates and not archive_mode:
+                        continue
+                    try:
+                        d = json.loads(raw)
+                    except Exception:
+                        stats.errors += 1
+                        continue
+                    if not isinstance(d, dict):
+                        if archive_mode:
                             stats.errors += 1
+                        continue
+                    if not participates:
+                        continue
+                    t = d.get("type")
+                    ts = d.get("timestamp")
+                    if ts and first_line_ts is None:
+                        first_line_ts = ts
+                    if ts:
+                        last_ts = ts
+                    # replay detection: the copied history is written as one burst; the first
+                    # gap of more than 2 s between consecutive lines ends it
+                    if in_replay and ts and prev_line_ts:
+                        a_, b_ = parse_iso(iso(prev_line_ts) or ""), parse_iso(iso(ts) or "")
+                        if a_ and b_ and (b_ - a_).total_seconds() > 2:
+                            in_replay = False
+                    if ts:
+                        prev_line_ts = ts
+                    p = d.get("payload")
+                    if not isinstance(p, dict):
+                        if t in ("session_meta", "turn_context", "response_item", "event_msg"):
+                            stats.errors += 1
+                        continue
+                    if t == "session_meta":
+                        if meta:
+                            # a second session_meta is the replayed parent's: proof of replay
+                            forked = True
+                            in_replay = True
                             continue
-                        if not isinstance(d, dict):
-                            if rollout_paths is not None:
-                                stats.errors += 1
-                            continue
-                        # Archive validation also reads records outside the replay timeline.
-                        if not participates:
-                            continue
-                        t = d.get("type")
-                        ts = d.get("timestamp")
-                        if ts and first_line_ts is None:
-                            first_line_ts = ts
-                        if ts:
-                            last_ts = ts
-                        # replay detection: the copied history is written as one burst; the first
-                        # gap of more than 2 s between consecutive lines ends it
-                        if in_replay and ts and prev_line_ts:
-                            a_, b_ = parse_iso(iso(prev_line_ts) or ""), parse_iso(iso(ts) or "")
-                            if a_ and b_ and (b_ - a_).total_seconds() > 2:
-                                in_replay = False
-                        if ts:
-                            prev_line_ts = ts
-                        p = d.get("payload")
-                        if not isinstance(p, dict):
-                            if t in ("session_meta", "turn_context", "response_item", "event_msg"):
-                                stats.errors += 1
-                            continue
-                        if t == "session_meta":
-                            if meta:
-                                # a second session_meta is the replayed parent's: proof of replay
-                                forked = True
-                                in_replay = True
-                                continue
-                            meta = p
-                            native = p.get("id")
-                            if rollout_paths is not None and isinstance(native, str) and re.fullmatch(
-                                    r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", native, re.I):
-                                thread_id = native.lower()
-                            forked = bool(p.get("forked_from_id"))
-                            src = p.get("source")
-                            if isinstance(src, dict) and "subagent" in src:
-                                forked = True
-                            in_replay = forked
-                            continue
-                        if t == "turn_context":
-                            model = p.get("model") or model
-                            cm = p.get("collaboration_mode")
-                            settings = cm.get("settings") if isinstance(cm, dict) else None
-                            effort = ((settings.get("reasoning_effort") if isinstance(settings, dict) else None)
-                                      or p.get("reasoning_effort") or effort)
-                            continue
-                        if t == "response_item":
-                            pt = p.get("type")
-                            if pt in ("function_call", "custom_tool_call"):
-                                n_tool += 1
-                            continue
-                        if t != "event_msg":
-                            continue
+                        meta = p
+                        native = p.get("id")
+                        if archive_mode and isinstance(native, str) and re.fullmatch(
+                                r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", native, re.I):
+                            thread_id = native.lower()
+                            trow = thread_rows.get(thread_id, {})
+                        forked = bool(p.get("forked_from_id"))
+                        src = p.get("source")
+                        if isinstance(src, dict) and "subagent" in src:
+                            forked = True
+                        in_replay = forked
+                        continue
+                    if t == "turn_context":
+                        model = p.get("model") or model
+                        cm = p.get("collaboration_mode")
+                        settings = cm.get("settings") if isinstance(cm, dict) else None
+                        effort = ((settings.get("reasoning_effort") if isinstance(settings, dict) else None)
+                                  or p.get("reasoning_effort") or effort)
+                        continue
+                    if t == "response_item":
                         pt = p.get("type")
-                        if pt == "user_message":
-                            n_user += 1
-                            continue
-                        if pt != "token_count":
-                            continue
-                        rl = p.get("rate_limits") or {}
-                        if isinstance(rl, dict) and rl.get("plan_type"):
-                            last_plan = rl.get("plan_type")
-                            credits = rl.get("credits")
-                            last_credits = credits.get("has_credits") if isinstance(credits, dict) else None
-                            last_limit = rl.get("limit_id")
-                        info = p.get("info")
-                        if not info:
-                            continue
-                        if not isinstance(info, dict):
-                            stats.errors += 1
-                            continue
-                        cumulative = info.get("total_token_usage") or {}
-                        last = info.get("last_token_usage") or {}
-                        if not isinstance(cumulative, dict) or not isinstance(last, dict) or (rollout_paths is not None and not last):
-                            stats.errors += 1
-                            continue
-                        tot = cumulative.get("total_tokens")
-                        inp, cached, output, reasoning = (last.get(field) or 0 for field in
-                                                          ("input_tokens", "cached_input_tokens", "output_tokens",
-                                                           "reasoning_output_tokens"))
-                        if any(type(amount) is not int or amount < 0 for amount in (inp, cached, output, reasoning)):
-                            stats.errors += 1
-                            continue
-                        if prev_total is not None and tot == prev_total:
+                        if pt in ("function_call", "custom_tool_call"):
+                            n_tool += 1
+                        continue
+                    if t != "event_msg":
+                        continue
+                    pt = p.get("type")
+                    if pt == "user_message":
+                        n_user += 1
+                        continue
+                    if pt != "token_count":
+                        continue
+                    rl = p.get("rate_limits") or {}
+                    if isinstance(rl, dict) and rl.get("plan_type"):
+                        last_plan = rl.get("plan_type")
+                        credits = rl.get("credits")
+                        last_credits = credits.get("has_credits") if isinstance(credits, dict) else None
+                        last_limit = rl.get("limit_id")
+                    info = p.get("info")
+                    if not info:
+                        continue
+                    if not isinstance(info, dict):
+                        stats.errors += 1
+                        continue
+                    cumulative = info.get("total_token_usage") or {}
+                    last = info.get("last_token_usage") or {}
+                    if not isinstance(cumulative, dict) or not isinstance(last, dict) or (archive_mode and not last):
+                        stats.errors += 1
+                        continue
+                    tot = cumulative.get("total_tokens")
+                    inp, cached, output, reasoning = (last.get(field) or 0 for field in
+                                                      ("input_tokens", "cached_input_tokens", "output_tokens",
+                                                       "reasoning_output_tokens"))
+                    if any(type(amount) is not int or amount < 0 for amount in (inp, cached, output, reasoning)):
+                        stats.errors += 1
+                        continue
+                    if prev_total is not None and tot == prev_total:
+                        stats.dedup += 1
+                        continue
+                    # replayed parent history at fork/spawn time: skip everything in the
+                    # leading burst (until the first >2 s gap between lines)
+                    if in_replay:
+                        stats.skipped_replay += 1
+                        prev_total = tot
+                        continue
+                    prev_total = tot
+                    e = event(
+                        "codex", host, iso(ts), thread_id, model or trow.get("model"),
+                        input_uncached=max(inp - cached, 0),
+                        cache_read=cached,
+                        cache_write=0,
+                        output=output,
+                        reasoning=reasoning,
+                        cwd=meta.get("cwd") or trow.get("cwd"),
+                        kind="subagent" if forked else "main",
+                        parent=meta.get("forked_from_id"),
+                        entrypoint=meta.get("originator"),
+                        version=meta.get("cli_version"),
+                        effort=effort,
+                        archived=archived,
+                        plan=last_plan,
+                        credits=last_credits,
+                        limit_id=last_limit,
+                        src=path,
+                    )
+                    if mirror is not None:
+                        signature = (ts, tot, inp, cached, e["output"], e["reasoning"])
+                        file_usage.add(signature)
+                        if signature in mirror:
                             stats.dedup += 1
                             continue
-                        # replayed parent history at fork/spawn time: skip everything in the
-                        # leading burst (until the first >2 s gap between lines)
-                        if in_replay:
-                            stats.skipped_replay += 1
-                            prev_total = tot
-                            continue
-                        prev_total = tot
-                        e = event(
-                            "codex", host, iso(ts), thread_id, model or trow.get("model"),
-                            input_uncached=max(inp - cached, 0),
-                            cache_read=cached,
-                            cache_write=0,
-                            output=output,
-                            reasoning=reasoning,
-                            cwd=meta.get("cwd") or trow.get("cwd"),
-                            kind="subagent" if forked else "main",
-                            parent=meta.get("forked_from_id"),
-                            entrypoint=meta.get("originator"),
-                            version=meta.get("cli_version"),
-                            effort=effort,
-                            archived=archived,
-                            plan=last_plan,
-                            credits=last_credits,
-                            limit_id=last_limit,
-                            src=path,
-                        )
-                        plan_counts[last_plan or "?"] = plan_counts.get(last_plan or "?", 0) + 1
-                        out.write(json.dumps(e) + "\n")
-                        stats.events += 1
-                        n_events_file += 1
-            except (OSError, EOFError) as ex:
-                stats.errors += 1
-                sys.stderr.write("ERR %s: %s\n" % (path, ex))
-            session_meta.append({
-                "tool": "codex", "host": host, "session": thread_id, "file": path, "bytes": size,
-                "cwd": meta.get("cwd") or trow.get("cwd"), "kind": "subagent" if forked else "main",
-                "parent": meta.get("forked_from_id"), "originator": meta.get("originator"),
-                "version": meta.get("cli_version"), "model": model or trow.get("model"),
-                "first_ts": iso(meta.get("timestamp") or first_line_ts), "last_ts": iso(last_ts),
-                "user_msgs": n_user, "tool_calls": n_tool, "calls": n_events_file,
-                "sqlite_tokens_used": trow.get("tokens_used"), "title": trow.get("title"),
-                "archived": archived, "plans": plan_counts,
-            })
-            if stats.files % 200 == 0:
-                stats.log(path)
+                    plan_counts[last_plan or "?"] = plan_counts.get(last_plan or "?", 0) + 1
+                    out.write(json.dumps(e) + "\n")
+                    stats.events += 1
+                    n_events_file += 1
+        except (OSError, EOFError) as ex:
+            stats.read_errors += 1
+            stats.errors += 1
+            sys.stderr.write("ERR %s: %s\n" % (path, ex))
+        session_meta.append({
+            "tool": "codex", "host": host, "session": thread_id, "file": path, "bytes": size,
+            "cwd": meta.get("cwd") or trow.get("cwd"), "kind": "subagent" if forked else "main",
+            "parent": meta.get("forked_from_id"), "originator": meta.get("originator"),
+            "version": meta.get("cli_version"), "model": model or trow.get("model"),
+            "first_ts": iso(meta.get("timestamp") or first_line_ts), "last_ts": iso(last_ts),
+            "user_msgs": n_user, "tool_calls": n_tool, "calls": n_events_file,
+            "sqlite_tokens_used": trow.get("tokens_used"), "title": trow.get("title"),
+            "archived": archived, "plans": plan_counts,
+        })
+        if stats.files % 200 == 0:
+            stats.log(path)
+        if mirror is not None:
+            mirror.update(file_usage)
 
 
 def scan_codex_history(root, host, out_prompts):
@@ -674,52 +699,158 @@ def scan_copilot(root, host, out, stats, session_meta, out_prompts):
 
 def scan_opencode(db, host, out, stats, session_meta, out_prompts):
     if not os.path.isfile(db):
-        return
+        return {}
     stats.files += 1
     stats.bytes += os.path.getsize(db)
+    counts = {"legacy_events": 0, "v2_events": 0, "matching_message_ids_skipped": 0}
     try:
-        c = sqlite3.connect("file:%s?mode=ro" % db.replace("\\", "/"), uri=True)
-        sess = {}
-        for row in c.execute("select id, directory, title, model, time_created, time_updated, cost from session"):
-            sess[row[0]] = {"cwd": row[1], "title": row[2], "model": row[3], "first_ts": iso(row[4]), "last_ts": iso(row[5]), "cost": row[6]}
-        for mid, sid, tc, data in c.execute("select id, session_id, time_created, data from message"):
-            stats.lines += 1
-            try:
-                d = json.loads(data)
-            except Exception:
-                stats.errors += 1
-                continue
-            if d.get("role") == "user":
-                txt = None
-                for (pdata,) in c.execute("select data from part where message_id=?", (mid,)):
+        with contextlib.closing(native_sources.open_database(db)) as c:
+            c.execute("BEGIN")
+            sessions = {}
+            session_fields = ("id", "directory", "title", "model", "time_created", "time_updated", "cost")
+            for table in ("session", "session_v2"):
+                fields = native_sources.columns(c, table)
+                if "id" not in fields:
+                    continue
+                projection = ", ".join(field if field in fields else "NULL" for field in session_fields)
+                for sid, cwd, title, model, created, updated, cost in c.execute("SELECT %s FROM %s" % (projection, table)):
+                    sessions[sid] = {"cwd": cwd, "title": title, "model": model,
+                                     "first_ts": iso(created), "last_ts": iso(updated), "cost": cost}
+
+            message_fields = {"id", "session_id", "time_created", "data"}
+            have_legacy = message_fields <= native_sources.columns(c, "message")
+            have_v2 = message_fields | {"type"} <= native_sources.columns(c, "session_message")
+            sources = []
+            if have_legacy:
+                sources.append(("legacy", "SELECT id, session_id, time_created, data FROM message"))
+            if have_v2:
+                query = "SELECT id, session_id, time_created, data FROM session_message WHERE type IN ('assistant', 'user')"
+                if have_legacy:
+                    overlap = " FROM session_message newer WHERE type = 'assistant' AND " \
+                              "EXISTS (SELECT 1 FROM message legacy WHERE legacy.id = newer.id)"
+                    counts["matching_message_ids_skipped"] = c.execute("SELECT COUNT(*)" + overlap).fetchone()[0]
+                    query += " AND NOT EXISTS (SELECT 1 FROM message legacy WHERE legacy.id = session_message.id)"
+                sources.append(("v2", query))
+            for layout, query in sources:
+                for mid, sid, created, data in c.execute(query):
+                    stats.lines += 1
                     try:
-                        pd = json.loads(pdata)
-                        if pd.get("type") == "text":
-                            txt = pd.get("text")
-                            break
-                    except Exception:
-                        pass
-                out_prompts.write(json.dumps({"tool": "opencode", "host": host, "ts": iso(tc), "session": sid, "cwd": (d.get("path") or {}).get("cwd"), "text": txt}) + "\n")
-                continue
-            tk = d.get("tokens") or {}
-            if not tk:
-                continue
-            cache = tk.get("cache") or {}
-            e = event(
-                "opencode", host, iso((d.get("time") or {}).get("created") or tc), sid,
-                "%s/%s" % (d.get("providerID"), d.get("modelID")),
-                input_uncached=tk.get("input") or 0, cache_read=cache.get("read") or 0, cache_write=cache.get("write") or 0,
-                output=tk.get("output") or 0, reasoning=tk.get("reasoning") or 0,
-                cwd=(d.get("path") or {}).get("cwd"), kind="main", entrypoint="opencode", cost_usd=d.get("cost"), src=db,
-            )
-            out.write(json.dumps(e) + "\n")
-            stats.events += 1
-        for sid, s in sess.items():
-            session_meta.append(dict(tool="opencode", host=host, session=sid, file=db, kind="main", **s))
-        c.close()
-    except Exception as ex:
+                        record = json.loads(data)
+                    except (TypeError, ValueError):
+                        stats.errors += 1
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    path = record.get("path") or {}
+                    cwd = (path.get("cwd") if isinstance(path, dict) else None) or sessions.get(sid, {}).get("cwd")
+                    if layout == "legacy" and record.get("role") == "user" and not isinstance(out_prompts, _NullWriter):
+                        text = opencode_legacy_prompt(c, mid)
+                        out_prompts.write(json.dumps({"tool": "opencode", "host": host, "ts": iso(created),
+                                                      "session": sid, "cwd": cwd, "text": text}) + "\n")
+                    tokens = record.get("tokens")
+                    if not isinstance(tokens, dict) or not tokens or record.get("role") == "user":
+                        continue
+                    cache = tokens.get("cache") or {}
+                    model = record.get("model") or {}
+                    provider = record.get("providerID") or (model.get("providerID") if isinstance(model, dict) else None)
+                    model_id = record.get("modelID") or (model.get("id") if isinstance(model, dict) else None)
+                    e = event(
+                        "opencode", host, iso((record.get("time") or {}).get("created") or created), sid,
+                        "%s/%s" % (provider, model_id),
+                        input_uncached=tokens.get("input") or 0, cache_read=cache.get("read") or 0, cache_write=cache.get("write") or 0,
+                        output=tokens.get("output") or 0, reasoning=tokens.get("reasoning") or 0,
+                        cwd=cwd, kind="main", entrypoint="opencode-v2" if layout == "v2" else "opencode",
+                        cost_usd=record.get("cost"), src=db,
+                    )
+                    if layout == "v2":
+                        e["request_id"] = "opencode-message:%s" % mid
+                    out.write(json.dumps(e) + "\n")
+                    stats.events += 1
+                    counts[layout + "_events"] += 1
+                    sessions.setdefault(sid, {"cwd": cwd})
+            for sid, session in sessions.items():
+                session_meta.append(dict(tool="opencode", host=host, session=sid, file=db, kind="main", **session))
+    except (OSError, sqlite3.Error) as ex:
         stats.errors += 1
         sys.stderr.write("opencode db failed: %s\n" % ex)
+    return counts
+
+
+def opencode_legacy_prompt(database, message_id):
+    for (data,) in database.execute("SELECT data FROM part WHERE message_id = ?", (message_id,)):
+        try:
+            part = json.loads(data)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(part, dict) and part.get("type") == "text":
+            return part.get("text")
+    return None
+
+
+def scan_dsh(root, host, out, stats, session_meta):
+    """Read the completed assistant step in a v0 DSH session journal."""
+    keys = ("inputTokens", "outputTokens", "cacheReadTokens", "reasoningTokens")
+    for path in walk_files(root, lambda name: name.endswith((".zstd", ".zst", ".jsonl"))):
+        if is_credential_file(path):
+            continue
+        stats.files += 1
+        try:
+            size = os.path.getsize(path)
+            stats.bytes += size
+            with source_streams.open_lines(path) as stream:
+                header = json.loads(next(stream, b"null"))
+                if not isinstance(header, dict) or header.get("type") != "session" or header.get("version") != 0:
+                    stats.errors += 1
+                    continue
+                session = header.get("id")
+                if not isinstance(session, str) or not session:
+                    stats.errors += 1
+                    continue
+                steps = {}
+                for line in stream:
+                    stats.lines += 1
+                    if b'"assistant/message"' not in line or b'"usage"' not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        stats.errors += 1
+                        continue
+                    if not isinstance(record, dict) or record.get("type") != "assistant/message" or record.get("surfaceOp") != "append":
+                        continue
+                    data = record.get("data")
+                    usage = data.get("usage") if isinstance(data, dict) else None
+                    if not isinstance(usage, dict):
+                        continue
+                    step = (data.get("turn"), data.get("step"))
+                    tokens = tuple(usage.get(key) for key in keys)
+                    if any(type(value) is not int or value < 0 for value in step + tokens):
+                        stats.errors += 1
+                        continue
+                    if step in steps:
+                        if steps[step] == tokens:
+                            stats.dedup += 1
+                        else:
+                            stats.errors += 1
+                        continue
+                    steps[step] = tokens
+                    input_, output, cache, reasoning = tokens
+                    timestamp = iso(record.get("time"))
+                    message = data.get("message")
+                    source = message.get("source") if isinstance(message, dict) else None
+                    model = source.get("model") if isinstance(source, dict) else None
+                    e = event("dsh", host, timestamp, session, model if isinstance(model, str) else None,
+                              input_uncached=input_, output=output, cache_read=cache, reasoning=reasoning,
+                              request_id="dsh-step:%s:%d:%d" % ((session,) + step), cwd=header.get("cwd"),
+                              kind="main", entrypoint="dsh", src=path)
+                    out.write(json.dumps(e) + "\n")
+                    stats.events += 1
+                session_meta.append({"tool": "dsh", "host": host, "session": session, "file": path, "bytes": size,
+                                     "kind": "main", "first_ts": iso(header.get("createdAt")), "calls": len(steps)})
+        except (OSError, ValueError) as error:
+            stats.read_errors += 1
+            stats.errors += 1
+            sys.stderr.write("DSH read failed: %s: %s\n" % (path, error))
 
 
 # ----------------------------------------------------------------------------
@@ -732,7 +863,8 @@ def scan_openclaw(root, host, out, stats, session_meta, out_prompts, seen=None, 
     de-duplicated across every file scanned (seen is shared by the caller)."""
     if seen is None:
         seen = set()
-    for path in sorted(walk_files(root, lambda f: f.endswith(".jsonl")), key=lambda p: (".checkpoint." in p, p)):
+    for path in sorted(walk_files(root, lambda f: f.endswith(".jsonl") or (tool == "openclaw" and f.endswith(".jsonl.gz"))),
+                       key=lambda p: (".checkpoint." in p, p)):
         if tool == "openclaw" and os.sep + "sessions" + os.sep not in path and "/sessions/" not in path:
             continue
         stats.files += 1
@@ -741,66 +873,71 @@ def scan_openclaw(root, host, out, stats, session_meta, out_prompts, seen=None, 
         parts = path.replace("\\", "/").split("/")
         agent = parts[-3] if len(parts) >= 3 else "?"
         deploy = root.rstrip("/\\").split("/")[-1]
-        sid = os.path.basename(path)[:-6]
+        sid = source_streams.uncompressed_name(path)[:-6]
         cwd = None
         model = provider = None
         first_ts = last_ts = None
         n_user = n_tool = n_ev = 0
-        with open(path, "rb") as fh:
-            for raw in fh:
-                stats.lines += 1
-                if b'"usage"' not in raw and b'"type":"session"' not in raw and b'"model_change"' not in raw and b'"role":"user"' not in raw:
-                    continue
-                try:
-                    d = json.loads(raw)
-                except Exception:
-                    stats.errors += 1
-                    continue
-                t = d.get("type")
-                ts = d.get("timestamp")
-                if ts:
-                    first_ts = first_ts or ts
-                    last_ts = ts
-                if t == "session":
-                    cwd = d.get("cwd")
-                elif t == "model_change":
-                    provider, model = d.get("provider"), d.get("modelId")
-                elif t == "message":
-                    m = d.get("message") or {}
-                    if m.get("role") == "user":
-                        n_user += 1
+        try:
+            with source_streams.open_lines(path) as fh:
+                for raw in fh:
+                    stats.lines += 1
+                    if b'"usage"' not in raw and b'"type":"session"' not in raw and b'"model_change"' not in raw and b'"role":"user"' not in raw:
+                        continue
+                    try:
+                        d = json.loads(raw)
+                    except Exception:
+                        stats.errors += 1
+                        continue
+                    t = d.get("type")
+                    ts = d.get("timestamp")
+                    if ts:
+                        first_ts = first_ts or ts
+                        last_ts = ts
+                    if t == "session":
+                        cwd = d.get("cwd")
+                    elif t == "model_change":
+                        provider, model = d.get("provider"), d.get("modelId")
+                    elif t == "message":
+                        m = d.get("message") or {}
+                        if m.get("role") == "user":
+                            n_user += 1
+                            c = m.get("content")
+                            txt = c if isinstance(c, str) else next((x.get("text") for x in c if isinstance(x, dict) and x.get("type") == "text"), None) if isinstance(c, list) else None
+                            if txt:
+                                out_prompts.write(json.dumps({"tool": "openclaw", "host": host, "ts": iso(ts), "session": sid, "cwd": cwd, "text": txt[:2000]}) + "\n")
+                            continue
+                        if m.get("role") != "assistant":
+                            continue
+                        u = m.get("usage")
+                        if not u:
+                            continue
+                        key = (d.get("id"), ts)
+                        if key in seen:
+                            stats.dedup += 1
+                            continue
+                        seen.add(key)
                         c = m.get("content")
-                        txt = c if isinstance(c, str) else next((x.get("text") for x in c if isinstance(x, dict) and x.get("type") == "text"), None) if isinstance(c, list) else None
-                        if txt:
-                            out_prompts.write(json.dumps({"tool": "openclaw", "host": host, "ts": iso(ts), "session": sid, "cwd": cwd, "text": txt[:2000]}) + "\n")
-                        continue
-                    if m.get("role") != "assistant":
-                        continue
-                    u = m.get("usage")
-                    if not u:
-                        continue
-                    key = (d.get("id"), ts)
-                    if key in seen:
-                        stats.dedup += 1
-                        continue
-                    seen.add(key)
-                    c = m.get("content")
-                    if isinstance(c, list):
-                        n_tool += sum(1 for x in c if isinstance(x, dict) and x.get("type") in ("toolCall", "tool_use", "tool_call"))
-                    cost = (u.get("cost") or {}).get("total")
-                    # Keep numeric zero, but retain the previous unknown-cost handling
-                    # for falsy malformed values (False, empty text or containers).
-                    if not cost and type(cost) not in (int, float):
-                        cost = None
-                    e = event(
-                        tool, host, iso(ts), sid, "%s/%s" % (m.get("provider") or provider, m.get("model") or model),
-                        input_uncached=u.get("input") or 0, cache_read=u.get("cacheRead") or 0, cache_write=u.get("cacheWrite") or 0,
-                        output=u.get("output") or 0, reasoning=0, cwd=cwd, kind="main", entrypoint="openclaw:%s" % deploy,
-                        project=agent, cost_usd=cost, src=path,
-                    )
-                    out.write(json.dumps(e) + "\n")
-                    stats.events += 1
-                    n_ev += 1
+                        if isinstance(c, list):
+                            n_tool += sum(1 for x in c if isinstance(x, dict) and x.get("type") in ("toolCall", "tool_use", "tool_call"))
+                        cost = (u.get("cost") or {}).get("total")
+                        # Keep numeric zero, but retain the previous unknown-cost handling
+                        # for falsy malformed values (False, empty text or containers).
+                        if not cost and type(cost) not in (int, float):
+                            cost = None
+                        e = event(
+                            tool, host, iso(ts), sid, "%s/%s" % (m.get("provider") or provider, m.get("model") or model),
+                            input_uncached=u.get("input") or 0, cache_read=u.get("cacheRead") or 0, cache_write=u.get("cacheWrite") or 0,
+                            output=u.get("output") or 0, reasoning=0, cwd=cwd, kind="main", entrypoint="openclaw:%s" % deploy,
+                            project=agent, cost_usd=cost, src=path,
+                        )
+                        out.write(json.dumps(e) + "\n")
+                        stats.events += 1
+                        n_ev += 1
+        except OSError as error:
+            stats.read_errors += 1
+            stats.errors += 1
+            sys.stderr.write("OpenClaw stream failed: %s: %s\n" % (path, error))
         session_meta.append({"tool": tool, "host": host, "session": sid, "file": path, "bytes": size, "cwd": cwd, "kind": "main",
                              "model": "%s/%s" % (provider, model), "originator": "openclaw:%s" % deploy, "first_ts": iso(first_ts), "last_ts": iso(last_ts),
                              "user_msgs": n_user, "tool_calls": n_tool, "calls": n_ev})
@@ -1276,6 +1413,17 @@ def _generic_specs(specs):
 
 def cmd_scan(a):
     generic = _generic_specs(a.generic_root)  # refuses a home, drive root or broad directory before anything is opened or written
+    desktop_roots = getattr(a, "claude_desktop_root", None) or []
+    dsh_roots = getattr(a, "dsh_root", None) or []
+    paseo_roots = getattr(a, "paseo_root", None) or []
+    for root in desktop_roots + dsh_roots + paseo_roots:
+        check_generic_root(os.path.realpath(os.path.expanduser(root)))
+    counter_dbs = []
+    for spec in getattr(a, "native_counter_db", None) or []:
+        tool, _, path = spec.partition("=")
+        if tool not in native_sources.COUNTER_TABLES or not path or is_credential_file(path):
+            raise SystemExit("native counter source must be an approved copilot-cli or hermes database")
+        counter_dbs.append((tool, path))
     mini_roots = getattr(a, "mini_swe_root", None) or []
     for root in mini_roots:
         check_generic_root(os.path.realpath(os.path.expanduser(root)))
@@ -1300,12 +1448,25 @@ def cmd_scan(a):
             np_ = scan_claude_history(root, a.host, outp) if capture else 0  # history.jsonl holds only prompt text: not opened when capture is off
             inventory.append({"tool": "claude-code", "host": a.host, "root": root, "events": stats.events - n0, "files": stats.files - f0, "bytes": stats.bytes - b0, "errors": stats.errors - e0, "prompts": np_})
             stats.log("claude root done %s" % root)
-        for root in a.codex_root or []:
+        for root in desktop_roots:
             n0, f0, b0, e0 = stats.events, stats.files, stats.bytes, stats.errors
+            scan_claude(root, a.host, out, stats, seen, session_meta, desktop=True)
+            inventory.append({"tool": "claude-code", "host": a.host, "root": root, "source_kind": "claude-desktop",
+                              "events": stats.events - n0, "files": stats.files - f0,
+                              "bytes": stats.bytes - b0, "errors": stats.errors - e0})
+        rollouts_by_root = {root: list(codex_rollouts(root)) for root in a.codex_root or []}
+        rollout_counts = Counter(source_streams.uncompressed_name(path)
+                                 for rollouts in rollouts_by_root.values() for path, _ in rollouts)
+        mirror_events = {name: set() for name, count in rollout_counts.items() if count > 1}
+        for root, rollouts in rollouts_by_root.items():
+            n0, f0, b0, e0 = stats.events, stats.files, stats.bytes, stats.errors
+            read0, dedup0 = stats.read_errors, stats.dedup
             rows = load_codex_threads(root)
-            scan_codex(root, a.host, out, stats, session_meta, rows)
+            scan_codex(root, a.host, out, stats, session_meta, rows, rollouts, mirror_events)
             np_ = scan_codex_history(root, a.host, outp) if capture else 0
             inventory.append({"tool": "codex", "host": a.host, "root": root, "events": stats.events - n0, "files": stats.files - f0, "bytes": stats.bytes - b0, "errors": stats.errors - e0, "prompts": np_,
+                              "compressed_files": sum(path.endswith((".gz", ".zst", ".zstd")) for path, _ in rollouts),
+                              "stream_errors": stats.read_errors - read0, "dedup_skipped": stats.dedup - dedup0,
                               "sqlite_threads": len(rows), "sqlite_tokens_used": sum((r.get("tokens_used") or 0) for r in rows.values())})
             stats.log("codex root done %s" % root)
         for root in a.copilot_root or []:
@@ -1314,8 +1475,43 @@ def cmd_scan(a):
             inventory.append({"tool": "copilot-cli", "host": a.host, "root": root, "events": stats.events - n0, "files": stats.files - f0, "bytes": stats.bytes - b0, "errors": stats.errors - e0})
         for db in a.opencode_db or []:
             n0, f0, b0, e0 = stats.events, stats.files, stats.bytes, stats.errors
-            scan_opencode(db, a.host, out, stats, session_meta, outp)
-            inventory.append({"tool": "opencode", "host": a.host, "root": db, "events": stats.events - n0, "files": stats.files - f0, "bytes": stats.bytes - b0, "errors": stats.errors - e0})
+            layouts = scan_opencode(db, a.host, out, stats, session_meta, outp)
+            inventory.append({"tool": "opencode", "host": a.host, "root": db, "events": stats.events - n0,
+                              "files": stats.files - f0, "bytes": stats.bytes - b0, "errors": stats.errors - e0, **layouts})
+        for root in dsh_roots:
+            n0, f0, b0, e0 = stats.events, stats.files, stats.bytes, stats.errors
+            scan_dsh(root, a.host, out, stats, session_meta)
+            inventory.append({"tool": "dsh", "host": a.host, "root": root, "events": stats.events - n0,
+                              "files": stats.files - f0, "bytes": stats.bytes - b0, "errors": stats.errors - e0})
+        for tool, db in dict.fromkeys(counter_dbs):
+            try:
+                size = os.path.getsize(db)
+                counters = native_sources.native_counters(tool, db)
+                errors = int(counters["status"] != "read")
+            except (OSError, sqlite3.Error) as error:
+                size, errors = 0, 1
+                counters = {"status": "unreadable", "error_type": type(error).__name__}
+            stats.files += int(size > 0)
+            stats.bytes += size
+            stats.errors += errors
+            inventory.append({"tool": tool, "host": a.host, "root": db, "source_kind": "native-counter",
+                              "events": 0, "files": int(size > 0), "bytes": size, "errors": errors, "native_counters": counters})
+        for root in paseo_roots:
+            for path in sorted(glob.glob(os.path.join(root, "*.tar.gz"))):
+                if is_credential_file(path):
+                    continue
+                try:
+                    size = os.path.getsize(path)
+                    counters = native_sources.paseo_archive_counters(path)
+                    errors = counters["malformed"]
+                except (OSError, tarfile.TarError) as error:
+                    size, errors = 0, 1
+                    counters = {"status": "unreadable", "error_type": type(error).__name__}
+                stats.files += int(size > 0)
+                stats.bytes += size
+                stats.errors += errors
+                inventory.append({"tool": "paseo", "host": a.host, "root": path, "source_kind": "archive-counter",
+                                  "events": 0, "files": int(size > 0), "bytes": size, "errors": errors, "native_counters": counters})
         openclaw_seen = set()
         for root in a.openclaw_root or []:
             n0, f0, b0, e0 = stats.events, stats.files, stats.bytes, stats.errors
@@ -1926,9 +2122,13 @@ def main():
     s = sub.add_parser("scan")
     s.add_argument("--host", required=True)
     s.add_argument("--claude-root", action="append")
+    s.add_argument("--claude-desktop-root", action="append")
     s.add_argument("--codex-root", action="append")
     s.add_argument("--copilot-root", action="append")
     s.add_argument("--opencode-db", action="append")
+    s.add_argument("--dsh-root", action="append")
+    s.add_argument("--paseo-root", action="append", help="Paseo transcript archive directory; reports usage evidence separately")
+    s.add_argument("--native-counter-db", action="append", help="copilot-cli=<db> or hermes=<db>; reports native counters without usage events")
     s.add_argument("--openclaw-root", action="append")
     s.add_argument("--pi-root", action="append", help="pi coding agent sessions dir (~/.pi/agent/sessions); same format as OpenClaw")
     s.add_argument("--gemini-root", action="append", help="Gemini CLI data dir (default ~/.gemini/tmp)")

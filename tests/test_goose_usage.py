@@ -496,9 +496,12 @@ class DiscoveryTests(unittest.TestCase):
     def test_remote_scanner_stages_native_module(self):
         with tempfile.TemporaryDirectory() as tmp:
             host = {"name": "fixture", "kind": "ssh", "ssh": "user@example.invalid", "remote_tmp": "/tmp/ai-ledger-fixture", "python": "python3", "goose_roots": ["/synthetic/sessions"]}
-            with mock.patch.object(run_pipeline, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            scratch = "/tmp/ai-ledger-fixture.abcdef12"
+            with mock.patch.object(run_pipeline, "run", return_value=subprocess.CompletedProcess([], 0, stdout=scratch + "\n")) as run:
                 run_pipeline.scan_host(host, tmp)
-            self.assertTrue(any(any(str(arg).endswith("/goose_usage.py") for arg in call.args[0]) for call in run.call_args_list))
+            upload = next(call.args[0] for call in run.call_args_list if call.args[0][0] == "scp")
+            self.assertTrue({"goose_usage.py", "native_sources.py", "source_streams.py"} <= {Path(arg).name for arg in upload})
+            self.assertEqual(run.call_args_list[-1].args[0][-1], "rm -rf -- " + scratch)
 
 
 class EndToEndTests(unittest.TestCase):

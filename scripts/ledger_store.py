@@ -29,6 +29,7 @@ from decimal import Decimal, InvalidOperation
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import safety  # noqa: E402
+import source_streams  # noqa: E402
 
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
@@ -46,7 +47,9 @@ def _sha(*parts):
 
 def event_key(e):
     """The natural key of one call: where it was logged and what it counted."""
-    return (e.get("tool"), e.get("host"), e.get("session"), os.path.basename(str(e.get("src") or "")), e.get("ts"),
+    source = str(e.get("src") or "")
+    filename = source_streams.uncompressed_name(source) if e.get("tool") == "codex" else os.path.basename(source)
+    return (e.get("tool"), e.get("host"), e.get("session"), filename, e.get("ts"),
             e.get("model"), e.get("input_uncached"), e.get("cache_read"), e.get("cache_write"), e.get("output"))
 
 
@@ -156,7 +159,9 @@ def _exact_numeric_evidence(value):
 
 
 def session_id(s):
-    return _sha("sess", s.get("tool"), s.get("host"), s.get("session"), os.path.basename(str(s.get("file") or "")))
+    source = str(s.get("file") or "")
+    filename = source_streams.uncompressed_name(source) if s.get("tool") == "codex" else os.path.basename(source)
+    return _sha("sess", s.get("tool"), s.get("host"), s.get("session"), filename)
 
 
 def prompt_id(p):

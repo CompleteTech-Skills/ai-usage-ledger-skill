@@ -394,10 +394,11 @@ def write_report_config(cfg):
 # run
 # ----------------------------------------------------------------------------
 
-TOOL_ROOT_KEYS = {"codex": ["codex_roots", "codex_sqlite"], "claude-code": ["claude_roots", "claude_stats_cache"], "copilot-cli": ["copilot_roots"],
+TOOL_ROOT_KEYS = {"codex": ["codex_roots", "codex_sqlite"], "claude-code": ["claude_roots", "claude_desktop_roots", "claude_stats_cache"], "copilot-cli": ["copilot_roots"],
                   "opencode": ["opencode_dbs"], "openclaw": ["openclaw_roots"], "gemini-cli": ["gemini_roots"], "qwen-code": ["qwen_roots"], "kimi": ["kimi_roots"],
-                  "mistral-vibe": ["vibe_roots"], "continue": ["continue_roots"], "pi": ["pi_roots"], "aider": ["aider_roots"], "mini-swe-agent": ["mini_swe_roots"], "goose": ["goose_roots"]}
-PREFIXED_KEYS = ("cline_roots", "generic_roots")  # "<tool>=<dir>" entries
+                  "mistral-vibe": ["vibe_roots"], "continue": ["continue_roots"], "pi": ["pi_roots"], "aider": ["aider_roots"],
+                  "mini-swe-agent": ["mini_swe_roots"], "goose": ["goose_roots"], "dsh": ["dsh_roots"], "paseo": ["paseo_roots"]}
+PREFIXED_KEYS = ("cline_roots", "generic_roots", "native_counter_dbs")  # "<tool>=<path>" entries
 
 
 def filter_manifest(src, dst, only=None, skip=None):

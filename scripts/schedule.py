@@ -136,7 +136,16 @@ def material_config(home, python, frequency, time_, weekday, flags, expires, man
             manifest_sha = hashlib.sha256(json.dumps(M, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
             for h in M.get("hosts", []):
                 roots = {k: v for k, v in h.items() if k.endswith("_roots") or k.endswith("_dbs")}
-                hosts.append({"name": h.get("name"), "kind": h.get("kind", "local"), "ssh": h.get("ssh"), "distro": h.get("distro"), "roots": roots})
+                selected = {"name": h.get("name"), "kind": h.get("kind", "local"), "ssh": h.get("ssh"),
+                            "distro": h.get("distro"), "roots": roots}
+                if h.get("ssh_config") and h.get("kind") == "ssh":
+                    selected["ssh_config_sha"] = None
+                    try:
+                        with open(h["ssh_config"], "rb") as fh:
+                            selected["ssh_config_sha"] = hashlib.sha256(fh.read()).hexdigest()
+                    except OSError:
+                        pass
+                hosts.append(selected)
         except Exception:
             pass
     return {"home": home, "python": python, "frequency": frequency, "time": time_, "weekday": weekday, "flags": sorted(flags), "expires": expires,
