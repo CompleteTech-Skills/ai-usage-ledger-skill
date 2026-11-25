@@ -898,6 +898,16 @@ def do_conversation(args):
     return subprocess.run([sys.executable, os.path.join(HERE, "conversation_export.py")] + args.rest).returncode
 
 
+def do_census(args):
+    import session_census
+
+    try:
+        return session_census.run(args, home_dir())
+    except (OSError, ValueError) as error:
+        sys.stderr.write("census: %s\n" % error)
+        return 2
+
+
 def do_reinit(args):
     cfg = load_config()
     if cfg and os.path.exists(cfg["store"]["path"]):
@@ -964,6 +974,11 @@ def main():
     cp = sub.add_parser("conversation", help="list or export full recorded conversations from explicitly selected files")
     cp.add_argument("rest", nargs=argparse.REMAINDER)
     cp.set_defaults(fn=do_conversation)
+    from session_census import options as census_options
+
+    cs = sub.add_parser("census", help="inventory local agent session paths, selected archives and saved usage")
+    census_options(cs)
+    cs.set_defaults(fn=do_census)
     ri = sub.add_parser("reinit", help="fresh onboarding; the previous store is kept with a timestamp")
     ri.add_argument("--yes", action="store_true")
     ri.add_argument("--brand-preset")

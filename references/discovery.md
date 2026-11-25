@@ -27,6 +27,42 @@
 
 Per home it checks, in order: `CODEX_HOME` or `~/.codex` (needs `sessions/` or `archived_sessions/`; `state_5.sqlite` noted), `~/.claude` (needs `projects/`; `stats-cache.json` noted), `COPILOT_HOME` or `~/.copilot/session-state`, `GEMINI_DATA_DIR` or `~/.gemini/tmp`, `QWEN_DATA_DIR` or `~/.qwen/history`, `KIMI_DATA_DIR` / `KIMI_SHARE_DIR` / `~/.kimi` / `~/.kimi-code`, `VIBE_HOME` or `~/.vibe/logs/session`, `~/.continue/dev_data`, `PI_AGENT_DIR` or `~/.pi/agent/sessions`, `OPENCODE_DATA_DIR` or `~/.local/share/opencode/opencode.db`, `OPENCLAW_DIR` or `~/.openclaw/agents`, the Cline family under each editor's global storage and `~/.cline`, and generic roots for Codebuff (`~/.config/manicode`), Droid (`~/.factory/sessions`), Amp, LM Studio, OpenHands, Grok, Hermes and Zcode. Environment overrides apply only to the profile the detector runs as.
 
+## Session census across selected filesystems
+
+Use the census to find alternate tool homes, retained OS profiles, native stores and archive candidates beyond the conventional home locations. Select only filesystems and archives the operator has authorized.
+
+```powershell
+python scripts/ledger.py census --all-volumes --wsl Ubuntu --inspect-archives
+```
+
+With no filesystem options the census examines the current profile. Repeat
+`--root PATH` for explicit local directories or approved existing mounts.
+`--all-volumes` selects Windows fixed-volume paths, including unlettered volumes
+that Windows exposes by device name. `--wsl DISTRO` runs a one-filesystem scan
+in the named running distro. Add each approved mounted Linux filesystem with
+`--wsl-root DISTRO=/PATH`.
+
+```bash
+python scripts/ledger.py census --root /media/old-install --archive saved-sessions.tar.gz --ledger usage.sqlite
+```
+
+The private HTML and JSON reports list source coverage, candidate file counts,
+distinct IDs from recognizable transcript headers, and saved metered usage
+when a SQLite ledger is supplied. The companion JSONL lists each candidate
+and its inspection status. `--inspect-archives` reads discovered ZIP member
+names. Each named `--archive` also reads replay-filtered Codex usage from
+supported ZIP and TAR members. The saved-ledger comparison uses UTC
+timestamps and reported token buckets. Compare archive results by source
+before adding them to a machine-wide total. Each census creates a new output
+directory. Use `--open` to open the report in the default browser.
+
+Directory traversal stops at mount boundaries and reports links, offline
+placeholders, inaccessible paths and unsupported reads. Disk images appear as
+path evidence. An already mounted filesystem can be examined with
+`--root` or `--wsl-root`. Outputs contain private paths and session identifiers.
+The census reads approved metadata and transcript headers without exporting
+message text, credential files or raw archive members.
+
 Two profiles that resolve to the same directory (a mapped or `subst` drive letter, a bind mount, a symlinked home) are reported once; the note `same volume as an already detected profile` explains the skip. Without that rule every call would be stored twice under two host names.
 
 What it does not do: read anything that needs elevation, follow SSH (name those hosts at the prompt or in `config.json` `extra_hosts`), or find gateway logs kept outside a home directory (`/srv`, `/opt`, containers). Use the sweep below for those and add them to the manifest by hand.

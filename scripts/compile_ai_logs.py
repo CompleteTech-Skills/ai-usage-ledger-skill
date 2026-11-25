@@ -395,7 +395,7 @@ def codex_rollouts(root):
 
 
 def scan_codex(root, host, out, stats, session_meta, thread_rows, rollouts=None, mirror_events=None,
-               *, rollout_paths=None, open_rollout=None):
+               *, rollout_paths=None, open_rollout=None, rollout_sizes=None):
     archive_mode = rollout_paths is not None
     if archive_mode:
         dirs = [os.path.join(root, "sessions"), os.path.join(root, "archived_sessions")]
@@ -410,7 +410,7 @@ def scan_codex(root, host, out, stats, session_meta, thread_rows, rollouts=None,
         mirror = mirror_events.get(filename)
         file_usage = set() if mirror is not None else None
         try:
-            size = os.path.getsize(path)
+            size = rollout_sizes[path] if rollout_sizes is not None else os.path.getsize(path)
         except OSError:
             stats.read_errors += 1
             stats.errors += 1

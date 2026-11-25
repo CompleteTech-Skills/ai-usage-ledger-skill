@@ -45,6 +45,11 @@ Relay this table to the operator, in chat or on the terminal, before the first o
 | Coverage limits | Detection reports the roots it found and the same-volume duplicates it skipped; a directory it could not read or a tool it does not know is not listed. Compare each host's inventory (`files`, `bytes` per root) with a native count when completeness matters (see `references/pitfalls.md` 17). |
 | How to remove everything | `python3 scripts/ledger.py schedule remove` (if a schedule exists), then delete `~/.ai-usage-ledger/` (or `$AI_USAGE_LEDGER_HOME`) and the generated directories under the working directory. `python3 scripts/ledger.py reinit` starts over with a fresh configuration and keeps the previous store beside the new one with a timestamp. If `archive.path` was set outside the ledger home, delete that directory too: the skill only ever uses a dedicated archive directory (it refuses one that already holds other files and marks its own with `.ai-usage-ledger-archive`), so nothing else lives there. |
 
+For machine-wide or retained-installation coverage, use `ledger.py census`
+with the operator's approved roots, volumes and running WSL distros. Use the
+[session census workflow](references/discovery.md#session-census-across-selected-filesystems)
+for archive comparison and coverage limits.
+
 ## System Boundary
 
 | Boundary | Use |
